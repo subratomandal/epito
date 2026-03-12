@@ -1,0 +1,11 @@
+# Statically link the Visual C++ runtime on Windows.
+# Eliminates vcruntime140.dll dependency.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# Optimize release builds for size
+[profile.release]
+strip = true       # Strip debug symbols
+lto = true          # Link-time optimization (smaller + faster binary)
+codegen-units = 1   # Single codegen unit = better optimization
+opt-level = "s"     # Optimize for size over speed
