@@ -410,16 +410,15 @@ fn build_args(
         "--ubatch-size".into(), "256".into(),
     ];
 
-    // Memory strategy:
-    //   macOS (Metal): --mlock — lock model in unified memory (shared CPU/GPU RAM)
-    //   Windows/Linux: --mmap (default) — memory-mapped, OS loads pages on demand
-    //                  This reduces initial RAM usage; model pages load as needed.
-    if cfg!(target_os = "macos") {
-        args.push("--mlock".into());
-        log::info!("[llama-server] Memory: mlock (unified memory)");
-    } else {
-        log::info!("[llama-server] Memory: mmap (demand-paged, lower initial RAM)");
-    }
+    // Memory strategy: --mmap on ALL platforms (the llama.cpp default).
+    // mmap = memory-mapped file. OS loads model pages on demand and can
+    // reclaim them under memory pressure. When AI is idle, the OS pages
+    // out model memory automatically. When AI is used again, pages reload
+    // from disk (fast — file is likely still in OS page cache).
+    // This is how Ollama manages model memory.
+    // We do NOT use --mlock because it permanently locks 4GB+ in RAM
+    // even when AI features aren't being used.
+    log::info!("[llama-server] Memory: mmap (OS-managed, reclaimable when idle)");
 
     match gpu {
         GpuBackend::Metal => {
@@ -659,6 +658,22 @@ pub fn is_running(state: &LlamaProcess) -> bool {
 #[tauri::command]
 pub fn get_llama_port(state: tauri::State<'_, LlamaProcess>) -> u16 {
     get_port(&state)
+}
+
+/// Stop llama-server to release GPU/CPU memory after idle timeout.
+/// Called by Node.js idle timer. Process restarts via start_llama_lazy
+/// when the next AI request comes in.
+#[tauri::command]
+pub fn stop_llama_idle(
+    state: tauri::State<'_, LlamaProcess>,
+) -> Result<(), String> {
+    if !is_running(&state) {
+        return Ok(());
+    }
+    log::info!("[llama-server] Idle timeout — stopping to release memory");
+    stop(&state);
+    log::info!("[llama-server] Stopped. Memory released. Will restart on next AI request.");
+    Ok(())
 }
 
 #[tauri::command]

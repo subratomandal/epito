@@ -523,6 +523,7 @@ pub fn run() {
             model::get_download_progress,
             llama_server::get_llama_port,
             llama_server::start_llama_lazy,
+            llama_server::stop_llama_idle,
             save_file_with_dialog,
         ])
         .setup(move |app| {
@@ -647,8 +648,9 @@ pub fn run() {
                 }
             });
 
-            // ── Spawn llama-server ──
+            // ── Spawn llama-server + idle lifecycle manager ──
             let handle_llama = app.handle().clone();
+            let idle_data_dir = data_dir.clone();
             thread::spawn(move || {
                 if model::model_exists() {
                     let llama_state = handle_llama.state::<llama_server::LlamaProcess>();
@@ -662,6 +664,39 @@ pub fn run() {
                     }
                 } else {
                     log::info!("[Lifecycle] No model — will prompt download");
+                }
+
+                // Idle lifecycle: watch for signal files from Node.js
+                // .idle-stop  → kill llama-server to free memory
+                // .idle-start → restart llama-server for next AI request
+                let stop_signal = idle_data_dir.join(".idle-stop");
+                let start_signal = idle_data_dir.join(".idle-start");
+                loop {
+                    if SHUTTING_DOWN.load(Ordering::Relaxed) { break; }
+                    thread::sleep(Duration::from_secs(2));
+
+                    if stop_signal.exists() {
+                        let _ = std::fs::remove_file(&stop_signal);
+                        let llama_state = handle_llama.state::<llama_server::LlamaProcess>();
+                        if llama_server::is_running(&llama_state) {
+                            log::info!("[Lifecycle] Idle stop signal — killing llama-server to free memory");
+                            llama_server::stop(&llama_state);
+                        }
+                    }
+
+                    if start_signal.exists() {
+                        let _ = std::fs::remove_file(&start_signal);
+                        let llama_state = handle_llama.state::<llama_server::LlamaProcess>();
+                        if !llama_server::is_running(&llama_state) && model::model_exists() {
+                            log::info!("[Lifecycle] Idle start signal — restarting llama-server");
+                            match llama_server::start(&handle_llama, &llama_state, llama_port) {
+                                Ok(port) => {
+                                    llama_server::wait_ready(port, Duration::from_secs(120));
+                                }
+                                Err(e) => log::warn!("[Lifecycle] Restart failed: {}", e),
+                            }
+                        }
+                    }
                 }
             });
 

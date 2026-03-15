@@ -15,27 +15,54 @@ const inferenceQueue: Array<{ resolve: () => void }> = [];
 // This matches how Ollama manages model memory.
 
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
-let modelLoadedInMemory = false;
+let llamaServerRunning = false;
 
 function resetIdleTimer(): void {
   if (idleTimer) clearTimeout(idleTimer);
-  modelLoadedInMemory = true;
-  idleTimer = setTimeout(unloadIdleModel, IDLE_TIMEOUT_MS);
+  llamaServerRunning = true;
+  idleTimer = setTimeout(stopIdleLlamaServer, IDLE_TIMEOUT_MS);
 }
 
-async function unloadIdleModel(): Promise<void> {
-  if (!modelLoadedInMemory) return;
+async function stopIdleLlamaServer(): Promise<void> {
+  if (!llamaServerRunning) return;
+  // Tell Tauri to kill the llama-server process entirely.
+  // This releases ALL memory (model weights + KV cache + GPU VRAM).
+  // The process restarts automatically via start_llama_lazy on next AI request.
   try {
-    const res = await fetch(`${LLAMA_URL}/slots/0?action=erase`, {
+    // Call our own API endpoint which invokes the Tauri stop_llama_idle command
+    await fetch(`http://127.0.0.1:${process.env.PORT || '3000'}/api/ai/idle-stop`, {
       method: 'POST',
       signal: AbortSignal.timeout(5000),
     });
-    if (res.ok) {
-      modelLoadedInMemory = false;
-      console.log('[LLM] Model unloaded from memory (idle timeout 120s). Will reload on next request.');
-    }
+    llamaServerRunning = false;
+    console.log('[LLM] llama-server stopped (idle 120s). Memory released. Restarts on next AI request.');
   } catch {
-    // llama-server may not be running — that's fine
+    // Fallback: at minimum erase the KV cache
+    try {
+      await fetch(`${LLAMA_URL}/slots/0?action=erase`, { method: 'POST', signal: AbortSignal.timeout(3000) });
+      console.log('[LLM] KV cache cleared (idle fallback).');
+    } catch {}
+  }
+}
+
+async function ensureLlamaRunning(): Promise<void> {
+  if (llamaServerRunning) return;
+  // Check if llama-server is actually responding
+  try {
+    const res = await fetch(`${LLAMA_URL}/health`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) { llamaServerRunning = true; return; }
+  } catch {}
+  // Not running — try to start via our API
+  console.log('[LLM] llama-server not running, requesting restart...');
+  try {
+    await fetch(`http://127.0.0.1:${process.env.PORT || '3000'}/api/ai/idle-start`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(130000), // model loading takes time
+    });
+    llamaServerRunning = true;
+    console.log('[LLM] llama-server restarted successfully.');
+  } catch (e) {
+    console.error('[LLM] Failed to restart llama-server:', e);
   }
 }
 
@@ -137,6 +164,8 @@ export async function checkLlamaConnection(): Promise<{ connected: boolean; mode
 }
 
 async function callLlama(prompt: string, systemPrompt: string, maxTokens?: number): Promise<string> {
+  await ensureLlamaRunning();
+
   const cooldown = computeThermalCooldown();
   if (cooldown > 0) await sleep(cooldown);
 
@@ -178,6 +207,8 @@ async function callLlama(prompt: string, systemPrompt: string, maxTokens?: numbe
 }
 
 async function* callLlamaStream(prompt: string, systemPrompt: string, maxTokens?: number): AsyncGenerator<string> {
+  await ensureLlamaRunning();
+
   const cooldown = computeThermalCooldown();
   if (cooldown > 0) await sleep(cooldown);
 
