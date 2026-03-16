@@ -160,19 +160,153 @@
   40% { transform: translateY(-6px); }
 }
 
-/* ─── App launch / exit transitions ─────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+   UX Micro-interactions & Loading States
+   ═══════════════════════════════════════════════════════════════════════ */
 
-/* App content appears from splash */
+/* ─── Skeleton Shimmer (replaces spinners for AI operations) ──────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    hsl(var(--muted)) 0%,
+    hsl(var(--muted-foreground) / 0.08) 50%,
+    hsl(var(--muted)) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}
+.skeleton-text { height: 14px; margin-bottom: 8px; border-radius: 3px; }
+.skeleton-text:last-child { width: 60%; }
+.skeleton-heading { height: 20px; width: 40%; margin-bottom: 12px; border-radius: 4px; }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ─── Button Press Feedback ───────────────────────────────────────── */
+button, [role="button"] {
+  transition: transform 80ms ease, opacity 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+button:active:not(:disabled), [role="button"]:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* ─── Note Card Animations ────────────────────────────────────────── */
+.note-enter {
+  animation: note-pop-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+@keyframes note-pop-in {
+  from { opacity: 0; transform: scale(0.92) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.note-exit {
+  animation: note-fade-out 0.2s ease-out forwards;
+}
+@keyframes note-fade-out {
+  to { opacity: 0; transform: translateX(12px); }
+}
+
+/* ─── AI Response Fade-in (paragraph by paragraph) ────────────────── */
+.ai-response p, .ai-response li, .ai-response h1,
+.ai-response h2, .ai-response h3, .ai-response div {
+  animation: text-fade-up 0.3s ease-out both;
+}
+.ai-response > :nth-child(1) { animation-delay: 0s; }
+.ai-response > :nth-child(2) { animation-delay: 0.05s; }
+.ai-response > :nth-child(3) { animation-delay: 0.1s; }
+.ai-response > :nth-child(4) { animation-delay: 0.15s; }
+.ai-response > :nth-child(5) { animation-delay: 0.2s; }
+.ai-response > :nth-child(n+6) { animation-delay: 0.25s; }
+
+@keyframes text-fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Typing Indicator for Chat ───────────────────────────────────── */
+.typing-indicator {
+  display: inline-flex;
+  gap: 3px;
+  padding: 4px 0;
+}
+.typing-indicator span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: hsl(var(--muted-foreground));
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+.typing-indicator span:nth-child(2) { animation-delay: 0.15s; }
+.typing-indicator span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+/* ─── Toast Notification ──────────────────────────────────────────── */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0;
+  animation: toast-in 0.25s ease-out forwards;
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.toast.toast-out {
+  animation: toast-out 0.2s ease-in forwards !important;
+}
+@keyframes toast-in {
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@keyframes toast-out {
+  to { opacity: 0; transform: translateX(-50%) translateY(10px); }
+}
+
+/* ─── View Crossfade ──────────────────────────────────────────────── */
+.view-enter {
+  animation: view-fade-in 0.2s ease-out forwards;
+}
+@keyframes view-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   App Launch / Exit / Splash
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Reduced motion: skip all animations */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* App content appears after splash */
 body {
   opacity: 0;
-  animation: epito-in 0.3s ease-out forwards;
+  animation: epito-in 0.3s ease-out 0.05s forwards;
 }
 
 @keyframes epito-in {
   to { opacity: 1; }
 }
 
-/* Exit — fast opacity fade, no blur (blur causes GPU repaint jank) */
+/* Exit — fast opacity fade */
 html.app-closing body {
   animation: epito-out 0.15s ease-in forwards !important;
 }

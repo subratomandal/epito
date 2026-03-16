@@ -252,94 +252,6 @@ fn check_node_binary(path: &std::path::Path) -> Option<String> {
     Some(normalize_windows_path(path).to_string_lossy().to_string())
 }
 
-/// Generates JS that injects a splash screen into the about:blank page.
-/// Self-contained HTML/CSS — no external dependencies.
-fn splash_screen_js() -> String {
-    r#"
-    document.documentElement.style.background = '#0a0a0f';
-    document.body.style.margin = '0';
-    document.body.style.background = '#0a0a0f';
-    document.body.innerHTML = `
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body {
-        background: #0a0a0f;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        height: 100vh;
-        overflow: hidden;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      }
-      .splash {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 32px;
-      }
-      .wordmark {
-        display: flex;
-        gap: 2px;
-        user-select: none;
-      }
-      .wordmark span {
-        font-size: 38px;
-        font-weight: 600;
-        letter-spacing: -0.01em;
-        color: rgba(250, 250, 250, 0);
-        transform: translateY(8px);
-        animation: letter-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-      }
-      .wordmark span:nth-child(1) { animation-delay: 0.05s; }
-      .wordmark span:nth-child(2) { animation-delay: 0.1s; }
-      .wordmark span:nth-child(3) { animation-delay: 0.15s; }
-      .wordmark span:nth-child(4) { animation-delay: 0.2s; }
-      .wordmark span:nth-child(5) { animation-delay: 0.25s; }
-      @keyframes letter-in {
-        0% {
-          color: rgba(250, 250, 250, 0);
-          transform: translateY(8px);
-        }
-        100% {
-          color: rgba(250, 250, 250, 0.88);
-          transform: translateY(0);
-        }
-      }
-      .loader {
-        width: 40px;
-        height: 1.5px;
-        background: rgba(250, 250, 250, 0.05);
-        border-radius: 1px;
-        overflow: hidden;
-        opacity: 0;
-        animation: fade-in 0.2s ease 0.35s forwards;
-      }
-      .loader::after {
-        content: '';
-        display: block;
-        width: 50%;
-        height: 100%;
-        background: rgba(250, 250, 250, 0.25);
-        border-radius: 1px;
-        animation: loader-slide 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-      }
-      @keyframes fade-in {
-        to { opacity: 1; }
-      }
-      @keyframes loader-slide {
-        0% { transform: translateX(-100%); }
-        100% { transform: translateX(300%); }
-      }
-    </style>
-    <div class="splash">
-      <div class="wordmark">
-        <span>E</span><span>p</span><span>i</span><span>t</span><span>o</span>
-      </div>
-      <div class="loader"></div>
-    </div>`;
-    "#.to_string()
-}
-
 pub(crate) fn normalize_windows_path(path: &std::path::Path) -> std::path::PathBuf {
     let resolved = path.canonicalize().unwrap_or(path.to_path_buf());
     #[cfg(windows)]
@@ -624,9 +536,9 @@ pub fn run() {
 
             if let Some(window) = app.get_webview_window("main") {
                 restore_window_state(&window);
-                // Inject splash screen immediately — eliminates white flash.
-                // Dark background + Epito wordmark with letter reveal animation.
-                let _ = window.eval(&splash_screen_js());
+                // Set dark background on about:blank immediately to prevent white flash.
+                // The React BrandedSplash component handles the actual animation.
+                let _ = window.eval("document.documentElement.style.background='#0a0a0f';document.body.style.background='#0a0a0f';document.body.style.margin='0';");
             }
 
             if cfg!(debug_assertions) {

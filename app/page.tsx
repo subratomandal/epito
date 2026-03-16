@@ -8,6 +8,7 @@ import SummaryPanel from '@/components/related/RelatedPanel';
 import SearchDialog from '@/components/search/SearchDialog';
 import DocumentViewer from '@/components/viewer/DocumentViewer';
 import StartupScreen from '@/components/startup/StartupScreen';
+import BrandedSplash from '@/components/common/BrandedSplash';
 import { Menu, Lightbulb } from 'lucide-react';
 import { ErrorBoundary } from '@/components/common/ErrorBoundary';
 import type { Note, Document, UploadedImage } from '@/lib/types';
@@ -31,6 +32,7 @@ function useIsMobile() {
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
+  const [showSplash, setShowSplash] = useState(true);
   const [showStartup, setShowStartup] = useState(true);
   const [notes, setNotes] = useState<Note[]>([]);
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -437,8 +439,9 @@ export default function HomePage() {
 
   return (
     <ErrorBoundary>
+    {showSplash && <BrandedSplash direction="in" onComplete={() => setShowSplash(false)} />}
     {showStartup && <StartupScreen onReady={() => setShowStartup(false)} />}
-    <div className="flex h-screen overflow-hidden relative">
+    <div className="flex h-screen overflow-hidden relative view-enter">
       {isMobile && (
         <div className="fixed top-0 left-0 right-0 z-40 flex items-center justify-between px-3 py-2 bg-card border-b border-border">
           <button
