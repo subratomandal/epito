@@ -8,8 +8,11 @@ use tauri::Manager;
 
 mod model;
 mod llama_server;
+#[cfg(windows)]
+mod native_win;
 
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static NODE_READY: AtomicBool = AtomicBool::new(false);
 static NODE_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
 // ─── Windows Job Object ──────────────────────────────────────────────────────
@@ -499,10 +502,26 @@ fn ctrlc_handler<F: FnOnce() + Send + 'static>(handler: F) -> Result<(), String>
     }).map_err(|e| format!("{}", e))
 }
 
+// ─── Splash Screen ───────────────────────────────────────────────────────
+
+fn show_splash(window: &tauri::WebviewWindow) {
+    let splash = r#"data:text/html;charset=utf-8,<!DOCTYPE html><html><head><style>*{margin:0;padding:0;box-sizing:border-box}body{display:flex;align-items:center;justify-content:center;height:100vh;background:%230a0a0f;font-family:system-ui,-apple-system,sans-serif;overflow:hidden}.c{text-align:center}.t{font-size:2.5rem;font-weight:700;color:%23fff;letter-spacing:-0.02em;animation:f .6s ease-out}.s{margin-top:1rem;display:flex;gap:6px;justify-content:center}.s span{width:6px;height:6px;border-radius:50%;background:%23555;animation:b 1.2s ease-in-out infinite}.s span:nth-child(2){animation-delay:.15s}.s span:nth-child(3){animation-delay:.3s}@keyframes f{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}@keyframes b{0%,80%,100%{opacity:.3;transform:scale(1)}40%{opacity:1;transform:scale(1.3)}}</style></head><body><div class="c"><div class="t">Epito</div><div class="s"><span></span><span></span><span></span></div></div></body></html>"#;
+    let _ = window.navigate(splash.parse().unwrap());
+    let _ = window.show();
+}
+
 // ─── App Entry ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Single-instance check — prevent multiple Epito processes from running.
+    // Must happen before ANY resource allocation (ports, Job Objects, windows).
+    // Uses a global named mutex; shows a native MessageBox if already running.
+    #[cfg(windows)]
+    if !native_win::check_single_instance() {
+        std::process::exit(0);
+    }
+
     let node_port = find_free_port();
     NODE_PORT.store(node_port, Ordering::Relaxed);
 
@@ -523,7 +542,6 @@ pub fn run() {
             model::get_download_progress,
             llama_server::get_llama_port,
             llama_server::start_llama_lazy,
-            llama_server::stop_llama_idle,
             save_file_with_dialog,
         ])
         .setup(move |app| {
@@ -532,18 +550,25 @@ pub fn run() {
             )?;
 
             log::info!("[Lifecycle] Application starting");
+
+            // Log system diagnostics — RAM, GPU VRAM, power status.
+            // Must happen after log plugin init so output actually reaches the log.
+            // Also caches nvidia-smi VRAM info for llama-server layer calculation.
+            #[cfg(windows)]
+            native_win::log_system_diagnostics();
+
             install_signal_handlers(app.handle().clone());
 
             if let Some(window) = app.get_webview_window("main") {
                 restore_window_state(&window);
-                // Set dark background on about:blank immediately to prevent white flash.
-                // The React BrandedSplash component handles the actual animation.
-                let _ = window.eval("document.documentElement.style.background='#0a0a0f';document.body.style.background='#0a0a0f';document.body.style.margin='0';");
+                show_splash(&window);
             }
 
             if cfg!(debug_assertions) {
                 let window = app.get_webview_window("main").unwrap();
                 window.navigate("http://127.0.0.1:3000".parse().unwrap())?;
+                let _ = window.show();
+                NODE_READY.store(true, Ordering::Release);
                 let handle = app.handle().clone();
                 thread::spawn(move || {
                     let llama_state = handle.state::<llama_server::LlamaProcess>();
@@ -646,60 +671,41 @@ pub fn run() {
                         if let Some(window) = handle_node.get_webview_window("main") {
                             let _ = window.navigate(url.parse().unwrap());
                         }
+                        // Signal that the UI is loaded — llama-server can start now
+                        // without competing with Node.js for disk I/O
+                        NODE_READY.store(true, Ordering::Release);
                     }
                     Err(e) => log::error!("[Lifecycle] Node.js spawn failed: {}", e),
                 }
             });
 
-            // ── Spawn llama-server + idle lifecycle manager ──
+            // ── Spawn llama-server (deferred until UI is ready) ──
             let handle_llama = app.handle().clone();
-            let idle_data_dir = data_dir.clone();
             thread::spawn(move || {
-                if model::model_exists() {
-                    let llama_state = handle_llama.state::<llama_server::LlamaProcess>();
-                    match llama_server::start(&handle_llama, &llama_state, llama_port) {
-                        Ok(port) => {
-                            if !llama_server::wait_ready(port, Duration::from_secs(120)) {
-                                log::error!("[Lifecycle] llama-server timeout (120s)");
-                            }
-                        }
-                        Err(e) => log::warn!("[Lifecycle] llama-server: {}", e),
-                    }
-                } else {
+                if !model::model_exists() {
                     log::info!("[Lifecycle] No model — will prompt download");
+                    return;
                 }
 
-                // Idle lifecycle: watch for signal files from Node.js
-                // .idle-stop  → kill llama-server to free memory
-                // .idle-start → restart llama-server for next AI request
-                let stop_signal = idle_data_dir.join(".idle-stop");
-                let start_signal = idle_data_dir.join(".idle-start");
-                loop {
-                    if SHUTTING_DOWN.load(Ordering::Relaxed) { break; }
-                    thread::sleep(Duration::from_secs(2));
+                // Wait for Node.js to be ready before starting llama-server.
+                // Loading the 4GB model competes with Node.js for disk I/O,
+                // causing the UI to feel sluggish. Deferring gives Node.js
+                // priority so the window appears fast.
+                log::info!("[Lifecycle] Waiting for Node.js before starting llama-server...");
+                while !NODE_READY.load(Ordering::Acquire) {
+                    if SHUTTING_DOWN.load(Ordering::Relaxed) { return; }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                log::info!("[Lifecycle] Node.js ready — starting llama-server now");
 
-                    if stop_signal.exists() {
-                        let _ = std::fs::remove_file(&stop_signal);
-                        let llama_state = handle_llama.state::<llama_server::LlamaProcess>();
-                        if llama_server::is_running(&llama_state) {
-                            log::info!("[Lifecycle] Idle stop signal — killing llama-server to free memory");
-                            llama_server::stop(&llama_state);
+                let llama_state = handle_llama.state::<llama_server::LlamaProcess>();
+                match llama_server::start(&handle_llama, &llama_state, llama_port) {
+                    Ok(port) => {
+                        if !llama_server::wait_ready(port, Duration::from_secs(120)) {
+                            log::error!("[Lifecycle] llama-server timeout (120s)");
                         }
                     }
-
-                    if start_signal.exists() {
-                        let _ = std::fs::remove_file(&start_signal);
-                        let llama_state = handle_llama.state::<llama_server::LlamaProcess>();
-                        if !llama_server::is_running(&llama_state) && model::model_exists() {
-                            log::info!("[Lifecycle] Idle start signal — restarting llama-server");
-                            match llama_server::start(&handle_llama, &llama_state, llama_port) {
-                                Ok(port) => {
-                                    llama_server::wait_ready(port, Duration::from_secs(120));
-                                }
-                                Err(e) => log::warn!("[Lifecycle] Restart failed: {}", e),
-                            }
-                        }
-                    }
+                    Err(e) => log::warn!("[Lifecycle] llama-server: {}", e),
                 }
             });
 
@@ -713,6 +719,7 @@ pub fn run() {
                     label, event: tauri::WindowEvent::CloseRequested { .. }, ..
                 } => {
                     if label == "main" {
+                        // Trigger full shutdown on window close, not just on Exit
                         perform_shutdown(app_handle);
                     }
                 }

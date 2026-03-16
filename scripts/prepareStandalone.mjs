@@ -84,8 +84,9 @@ for (const mod of NATIVE_MODULES) {
 
 const bsqlDest = join(STANDALONE_MODULES, 'better-sqlite3');
 if (existsSync(bsqlDest)) {
-  // Keep build/Release/better_sqlite3.node (the actual native binary)
-  // Strip everything else: .o files, .a files, deps/, src/, test/
+  // Keep build/Release/better_sqlite3.node (the native binding) but strip
+  // everything else. When installed via node-gyp (no prebuilds/), the binding
+  // lives in build/Release/ and the `bindings` package resolves it from there.
   for (const dir of ['deps', 'src', 'benchmark', 'test']) {
     const target = join(bsqlDest, dir);
     if (existsSync(target)) {
@@ -96,39 +97,28 @@ if (existsSync(bsqlDest)) {
     }
   }
 
-  // Strip build artifacts (.o, .a, .mk) but keep .node binaries
+  // Strip build intermediates (.obj, .lib, .pdb, .exp, .iobj, .ipdb) but keep .node
   const buildRelease = join(bsqlDest, 'build', 'Release');
   if (existsSync(buildRelease)) {
-    for (const f of readdirSync(buildRelease, { recursive: true, withFileTypes: false })) {
-      // Keep only .node files, remove .o, .a, .target dirs
-    }
-    const objDir = join(buildRelease, 'obj.target');
-    if (existsSync(objDir)) {
-      const size = dirSize(objDir);
-      rmSync(objDir, { recursive: true, force: true });
-      totalSaved += size;
-      console.log(`  STRIP: better-sqlite3/build/Release/obj.target/ (${mb(size)})`);
-    }
-    // Remove .a static libraries
-    for (const f of readdirSync(buildRelease)) {
-      if (f.endsWith('.a')) {
-        const target = join(buildRelease, f);
-        const size = statSync(target).size;
-        rmSync(target);
+    const KEEP_EXTS = ['.node'];
+    for (const entry of readdirSync(buildRelease, { withFileTypes: true })) {
+      const full = join(buildRelease, entry.name);
+      if (entry.isDirectory()) {
+        const size = dirSize(full);
+        rmSync(full, { recursive: true, force: true });
         totalSaved += size;
-        console.log(`  STRIP: better-sqlite3/build/Release/${f} (${mb(size)})`);
+        console.log(`  STRIP: better-sqlite3/build/Release/${entry.name}/ (${mb(size)})`);
+      } else if (entry.isFile() && !KEEP_EXTS.some(ext => entry.name.endsWith(ext))) {
+        const size = statSync(full).size;
+        rmSync(full);
+        totalSaved += size;
+        console.log(`  STRIP: better-sqlite3/build/Release/${entry.name} (${mb(size)})`);
       }
     }
-    // Remove test_extension.node (not needed at runtime)
-    const testExt = join(buildRelease, 'test_extension.node');
-    if (existsSync(testExt)) {
-      const size = statSync(testExt).size;
-      rmSync(testExt);
-      totalSaved += size;
-    }
+    console.log('  OK: better-sqlite3 build/Release/*.node preserved');
   }
 
-  // Ensure prebuilds are present (fallback for bindings module)
+  // Ensure prebuilds are present (used when installed via prebuild-install)
   const prebuildsSrc = join(ROOT, 'node_modules', 'better-sqlite3', 'prebuilds');
   if (existsSync(prebuildsSrc)) {
     const prebuildsDest = join(bsqlDest, 'prebuilds');

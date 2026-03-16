@@ -1,5 +1,4 @@
 import { NextRequest } from 'next/server';
-import { extractFocusedContext } from '@/lib/ai/answer-engine';
 import {
   summarizeTextStream, summarizeChunksStream,
   explainTextStream,
@@ -8,7 +7,6 @@ import {
   explainSectionStream,
   cleanInputText,
 } from '@/lib/ai/llm';
-import * as db from '@/lib/database';
 import { retrieveChunksForSummarization, contextualRetrieveForChat } from '@/lib/ai/pipeline';
 import { canAcceptTask, taskStarted, taskCompleted, isShuttingDown } from '@/lib/lifecycle';
 
@@ -81,52 +79,31 @@ export async function POST(request: NextRequest) {
 
           const queryType = classifyQuery(chatMessage);
 
-          if (queryType === 'greeting') {
+          if (queryType === 'greeting' || queryType === 'casual') {
             const greeting = getGreetingResponse();
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: greeting })}\n\n`));
           } else {
             const retrieval = await contextualRetrieveForChat(sourceId || null, chatMessage, 5);
 
-            // Try code extraction on RAW chunks FIRST (no model needed, instant)
-            const rawChunks = sourceId ? db.getChunksByNote(sourceId).map((c: any) => c.content) : [];
-            if (rawChunks.length > 0) {
-              const extraction = extractFocusedContext(chatMessage, rawChunks);
-              if (extraction.directAnswer) {
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: extraction.directAnswer })}\n\n`));
-                controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
-                controller.close();
-                return;
-              }
+            if (retrieval.contexts.length > 0) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+                progress: retrieval.method === 'contextual'
+                  ? `Found ${retrieval.sources.length} relevant section${retrieval.sources.length > 1 ? 's' : ''} in document...`
+                  : 'Searching document...',
+              })}\n\n`));
 
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-                progress: `Found ${retrieval.sources.length} relevant section${retrieval.sources.length > 1 ? 's' : ''} in document...`,
+                retrieval: {
+                  method: retrieval.method,
+                  sources: retrieval.sources,
+                },
               })}\n\n`));
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-                retrieval: { method: retrieval.method, sources: retrieval.sources },
-              })}\n\n`));
-            }
 
-            try {
-              for await (const chunk of chatWithRAGStream(
-                retrieval.contexts.length > 0 ? retrieval.contexts : [],
-                chatMessage,
-                chatHistory || [],
-              )) {
+              for await (const chunk of chatWithRAGStream(retrieval.contexts, chatMessage, chatHistory || [])) {
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: chunk })}\n\n`));
               }
-            } catch {
-              // Model unavailable — use raw extracted sentences as fallback
-              if (retrieval.contexts.length > 0) {
-                const ext = extractFocusedContext(chatMessage, retrieval.contexts);
-                if (ext.matchCount > 0) {
-                  const sentences = ext.focusedContext.split(/(?<=[.!?])\s+/).filter(s => s.length > 20).slice(0, 5);
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: 'Based on your notes: ' + sentences.join(' ') })}\n\n`));
-                } else {
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: "I couldn't find an answer in your notes for this." })}\n\n`));
-                }
-              } else {
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: "I couldn't find an answer in your notes for this." })}\n\n`));
-              }
+            } else {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: 'No relevant content found in the document to answer your question. Try rephrasing or ensure the document has been processed.' })}\n\n`));
             }
           }
         } else if (action === 'summarize-section') {

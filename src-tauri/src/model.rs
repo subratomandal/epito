@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter};
 
 const MODEL_FILENAME: &str = "mistral-7b-instruct-v0.2.Q4_K_M.gguf";
 const MODEL_URL: &str = "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf";
-const EXPECTED_SIZE: u64 = 4_368_438_944;
+const EXPECTED_SIZE: u64 = 4_368_439_584;
 
 static DOWNLOAD_PROGRESS: Mutex<Option<DownloadProgress>> = Mutex::new(None);
 
@@ -145,7 +145,16 @@ async fn do_download(
     };
 
     use tokio::io::AsyncWriteExt;
-    let file = if resume_from > 0 {
+    // If we requested a resume but the server sent 200 (full content) instead of 206,
+    // we must start from scratch — don't append to the existing partial file.
+    let actual_resume = if resume_from > 0 && response.status().as_u16() != 206 {
+        log::info!("Server returned 200 instead of 206 — restarting download from scratch");
+        0
+    } else {
+        resume_from
+    };
+
+    let file = if actual_resume > 0 {
         tokio::fs::OpenOptions::new()
             .append(true)
             .open(tmp_path)
@@ -158,7 +167,7 @@ async fn do_download(
     };
 
     let mut writer = tokio::io::BufWriter::new(file);
-    let mut downloaded = resume_from;
+    let mut downloaded = actual_resume;
     let start_time = std::time::Instant::now();
     let mut last_progress = std::time::Instant::now();
 

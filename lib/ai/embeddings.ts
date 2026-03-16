@@ -33,10 +33,17 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   await initEmbeddings();
 
   const truncated = text.slice(0, 2000);
-  const result = await (embedder as (text: string, opts: Record<string, unknown>) => Promise<{ data: Float32Array }>)(
-    truncated,
-    { pooling: 'mean', normalize: true }
-  );
+
+  // 30-second timeout per embedding to prevent infinite hangs
+  const result = await Promise.race([
+    (embedder as (text: string, opts: Record<string, unknown>) => Promise<{ data: Float32Array }>)(
+      truncated,
+      { pooling: 'mean', normalize: true }
+    ),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Embedding generation timed out (30s)')), 30000)
+    ),
+  ]);
 
   return Array.from(result.data);
 }

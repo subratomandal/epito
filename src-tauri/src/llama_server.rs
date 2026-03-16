@@ -353,16 +353,47 @@ pub fn start(
 
     let gpu = detect_gpu_backend(&dll_dirs);
 
+    // ── VRAM-aware GPU layer calculation (Ollama pattern) ──
+    // Instead of hardcoding --n-gpu-layers 99, query total VRAM and calculate
+    // how many layers safely fit. Prevents OOM crashes on 4-6GB GPUs.
+    // If VRAM is too low for any GPU offload, fall back to CPU.
+    let gpu_layers = calculate_gpu_layers_for_backend(gpu);
+
+    // If VRAM can't fit even 5 layers, switch to CPU instead of CUDA
+    let (gpu, gpu_layers) = if gpu_layers == 0 && gpu != GpuBackend::CpuOnly {
+        log::info!("[llama-server] Not enough VRAM for GPU offload — switching to CPU");
+        (GpuBackend::CpuOnly, 0)
+    } else {
+        (gpu, gpu_layers)
+    };
+
+    // ── Power-aware thread/batch adjustment ──
+    // On battery: reduce CPU threads (50%) and batch size (256 → from 512).
+    // GPU layers stay the same — the GPU's own power management handles throttling.
+    // On AC or desktops: use full resources.
+    let (adj_threads, batch_size) = adjust_for_power(threads);
+
+    // ── System memory check ──
+    // If total RAM < 8GB, disable --mlock to avoid starving the OS.
+    // The 4.3GB model with mlock would leave <4GB for Windows + Node.js.
+    let use_mlock = check_mlock_safe();
+
     // Try GPU backend first. If it fails (driver mismatch, VRAM too small),
     // fall back to CPU. This matches how Ollama handles GPU init failures.
     let result = spawn_llama_server(
-        &binary, binary_dir, &dll_dirs, &model_path, port, threads, gpu,
+        &binary, binary_dir, &dll_dirs, &model_path, port, adj_threads, gpu,
+        gpu_layers, batch_size, use_mlock,
     );
 
     match result {
         Ok(child) => {
             #[cfg(windows)]
             crate::win_job::assign(&child);
+
+            // Set llama-server to BELOW_NORMAL priority — prevents inference
+            // from starving the UI or other user applications (Chrome pattern).
+            #[cfg(windows)]
+            crate::native_win::set_process_priority(&child, crate::native_win::BELOW_NORMAL_PRIORITY);
 
             *state.child.lock().unwrap() = Some(child);
             *state.port.lock().unwrap() = port;
@@ -374,11 +405,15 @@ pub fn start(
                 "[llama-server] {:?} backend failed: {}. Retrying with CPU fallback...", gpu, e
             );
             let child = spawn_llama_server(
-                &binary, binary_dir, &dll_dirs, &model_path, port, threads, GpuBackend::CpuOnly,
+                &binary, binary_dir, &dll_dirs, &model_path, port, adj_threads,
+                GpuBackend::CpuOnly, 0, batch_size, use_mlock,
             )?;
 
             #[cfg(windows)]
             crate::win_job::assign(&child);
+
+            #[cfg(windows)]
+            crate::native_win::set_process_priority(&child, crate::native_win::BELOW_NORMAL_PRIORITY);
 
             *state.child.lock().unwrap() = Some(child);
             *state.port.lock().unwrap() = port;
@@ -389,11 +424,75 @@ pub fn start(
     }
 }
 
+/// Calculate GPU layers based on VRAM (CUDA) or use full offload (other backends).
+fn calculate_gpu_layers_for_backend(gpu: GpuBackend) -> u32 {
+    match gpu {
+        GpuBackend::CpuOnly => 0,
+        GpuBackend::Cuda => {
+            // Query VRAM (cached from startup diagnostics, no extra nvidia-smi call)
+            #[cfg(windows)]
+            {
+                if let Some(vram) = crate::native_win::query_gpu_vram() {
+                    return crate::native_win::calculate_gpu_layers(vram.total_mb);
+                }
+                // nvidia-smi unavailable — full offload, let llama.cpp handle it
+                log::warn!("[GPU] Could not query VRAM — using full offload (99 layers)");
+                99
+            }
+            #[cfg(not(windows))]
+            { 99 }
+        }
+        // Metal, Vulkan, ROCm — no VRAM query mechanism, use full offload.
+        // llama.cpp will gracefully handle insufficient VRAM for these backends.
+        _ => 99,
+    }
+}
+
+/// Adjust threads and batch size for battery power.
+/// On battery: halve threads (reduces CPU power draw), reduce batch size.
+/// On AC/desktop: use full resources.
+fn adjust_for_power(threads: usize) -> (usize, usize) {
+    #[cfg(windows)]
+    {
+        let power = crate::native_win::get_power_status();
+        if power.has_battery && !power.on_ac {
+            let reduced = (threads / 2).max(2);
+            log::info!(
+                "[llama-server] Battery mode ({}%) — threads: {} → {}, batch: 512 → 256",
+                power.battery_percent, threads, reduced
+            );
+            return (reduced, 256);
+        }
+    }
+    (threads, 512)
+}
+
+/// Check if --mlock is safe given available system RAM.
+/// Mlock pins the 4.3GB model in physical RAM. On systems with <8GB total,
+/// this starves the OS and Node.js, causing severe swapping.
+fn check_mlock_safe() -> bool {
+    #[cfg(windows)]
+    {
+        let mem = crate::native_win::get_system_memory();
+        if mem.total_mb > 0 && mem.total_mb < 8192 {
+            log::warn!(
+                "[llama-server] Total RAM {:.1}GB < 8GB — disabling --mlock to prevent OS starvation",
+                mem.total_mb as f64 / 1024.0
+            );
+            return false;
+        }
+    }
+    true
+}
+
 fn build_args(
     model_path: &std::path::Path,
     port: u16,
     threads: usize,
     gpu: GpuBackend,
+    gpu_layers: u32,
+    batch_size: usize,
+    use_mlock: bool,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--model".into(), model_path.to_string_lossy().to_string(),
@@ -406,41 +505,35 @@ fn build_args(
         "--cache-reuse".into(), "256".into(),
         "--defrag-thold".into(), "0.1".into(),
         "--slot-prompt-similarity".into(), "0.5".into(),
-        "--batch-size".into(), "512".into(),
-        "--ubatch-size".into(), "256".into(),
+        "--batch-size".into(), batch_size.to_string(),
+        "--ubatch-size".into(), (batch_size / 2).max(64).to_string(),
     ];
 
-    // Memory strategy: --mmap on ALL platforms (the llama.cpp default).
-    // mmap = memory-mapped file. OS loads model pages on demand and can
-    // reclaim them under memory pressure. When AI is idle, the OS pages
-    // out model memory automatically. When AI is used again, pages reload
-    // from disk (fast — file is likely still in OS page cache).
-    // This is how Ollama manages model memory.
-    // We do NOT use --mlock because it permanently locks 4GB+ in RAM
-    // even when AI features aren't being used.
-    log::info!("[llama-server] Memory: mmap (OS-managed, reclaimable when idle)");
+    if use_mlock {
+        args.push("--mlock".into());
+    }
 
     match gpu {
         GpuBackend::Metal => {
-            log::info!("[llama-server] Backend: Metal (Apple GPU, full offload, flash-attn)");
-            args.extend(["--n-gpu-layers".into(), "99".into()]);
-            args.push("--flash-attn".into());
+            log::info!("[llama-server] Backend: Metal ({} layers, flash-attn)", gpu_layers);
+            args.extend(["--n-gpu-layers".into(), gpu_layers.to_string()]);
+            args.extend(["--flash-attn".into(), "on".into()]);
         }
         GpuBackend::Cuda => {
-            log::info!("[llama-server] Backend: CUDA (NVIDIA GPU, full offload, flash-attn)");
-            args.extend(["--n-gpu-layers".into(), "99".into()]);
-            args.push("--flash-attn".into());
+            log::info!("[llama-server] Backend: CUDA ({} layers, flash-attn)", gpu_layers);
+            args.extend(["--n-gpu-layers".into(), gpu_layers.to_string()]);
+            args.extend(["--flash-attn".into(), "on".into()]);
         }
         GpuBackend::Vulkan => {
-            log::info!("[llama-server] Backend: Vulkan (GPU, full offload)");
-            args.extend(["--n-gpu-layers".into(), "99".into()]);
+            log::info!("[llama-server] Backend: Vulkan ({} layers)", gpu_layers);
+            args.extend(["--n-gpu-layers".into(), gpu_layers.to_string()]);
         }
         GpuBackend::Rocm => {
-            log::info!("[llama-server] Backend: ROCm (AMD GPU, full offload)");
-            args.extend(["--n-gpu-layers".into(), "99".into()]);
+            log::info!("[llama-server] Backend: ROCm ({} layers)", gpu_layers);
+            args.extend(["--n-gpu-layers".into(), gpu_layers.to_string()]);
         }
         GpuBackend::CpuOnly => {
-            log::info!("[llama-server] Backend: CPU fallback (no GPU offload)");
+            log::info!("[llama-server] Backend: CPU (no GPU offload)");
             args.extend(["--n-gpu-layers".into(), "0".into()]);
         }
     }
@@ -457,8 +550,11 @@ fn spawn_llama_server(
     port: u16,
     threads: usize,
     gpu: GpuBackend,
+    gpu_layers: u32,
+    batch_size: usize,
+    use_mlock: bool,
 ) -> Result<Child, String> {
-    let args = build_args(model_path, port, threads, gpu);
+    let args = build_args(model_path, port, threads, gpu, gpu_layers, batch_size, use_mlock);
 
     let mut cmd = Command::new(binary);
     cmd.args(&args)
@@ -658,22 +754,6 @@ pub fn is_running(state: &LlamaProcess) -> bool {
 #[tauri::command]
 pub fn get_llama_port(state: tauri::State<'_, LlamaProcess>) -> u16 {
     get_port(&state)
-}
-
-/// Stop llama-server to release GPU/CPU memory after idle timeout.
-/// Called by Node.js idle timer. Process restarts via start_llama_lazy
-/// when the next AI request comes in.
-#[tauri::command]
-pub fn stop_llama_idle(
-    state: tauri::State<'_, LlamaProcess>,
-) -> Result<(), String> {
-    if !is_running(&state) {
-        return Ok(());
-    }
-    log::info!("[llama-server] Idle timeout — stopping to release memory");
-    stop(&state);
-    log::info!("[llama-server] Stopped. Memory released. Will restart on next AI request.");
-    Ok(())
 }
 
 #[tauri::command]
