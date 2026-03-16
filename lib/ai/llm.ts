@@ -1,3 +1,5 @@
+import { tryAnswer } from './answer-engine';
+
 const LLAMA_PORT = process.env.LLAMA_SERVER_PORT || '8080';
 const LLAMA_URL = `http://127.0.0.1:${LLAMA_PORT}`;
 const MODEL = 'mistral-7b-instruct';
@@ -1251,22 +1253,40 @@ async function chatPipeline(
       context = truncTk(rawContext, TOKEN_BUDGET.context);
     }
 
+    // ── Answer Engine: try code-based extraction BEFORE calling the model ──
+    // Research (arxiv 2603.11513): 7B models extract correct answers only
+    // 14.6% of the time. Code extraction is deterministic and reliable.
+    const allChunks = isRAG && chunks ? chunks : context ? [context] : [];
+    const engineResult = tryAnswer(rawQuery, allChunks);
+    if (engineResult && engineResult.skipModel) {
+      console.log(`[Chat] Answer engine: code-based answer (skipped model)`);
+      recentResponses.push(engineResult.answer);
+      if (recentResponses.length > 5) recentResponses.shift();
+      return engineResult.answer;
+    }
+
+    // If engine returned a tiny prompt, use it as context instead of full chunks
+    let effectiveContext = context;
+    if (engineResult && !engineResult.skipModel) {
+      effectiveContext = engineResult.tinyPrompt;
+      console.log(`[Chat] Answer engine: condensed context (${effectiveContext.length} chars)`);
+    }
+
     // Step 6: Prompt assembly
     const flags = { frustrated, isCorrection, intent };
     let messages: Array<{ role: string; content: string }>;
 
-    if (intent === 'EXHAUSTIVE_LIST' && context) {
-      // Extractive mode: direct extraction prompt instead of generative
+    if (intent === 'EXHAUSTIVE_LIST' && effectiveContext) {
       const entityType = rawQuery.replace(/\b(list|all|every|mention|name)\b/gi, '').trim() || 'items';
       messages = [{
         role: 'system',
         content: `Extract every ${entityType} mentioned in the following text. Return ONLY the names, one per line. Do not skip any. Do not add explanations.`,
       }, {
         role: 'user',
-        content: `Text:\n${context}\n\nList:`,
+        content: `Text:\n${effectiveContext}\n\nList:`,
       }];
     } else {
-      messages = buildMessages(context, summary, recent, rewritten, flags);
+      messages = buildMessages(effectiveContext, summary, recent, rewritten, flags);
     }
 
     // Step 7: Generation
@@ -1381,6 +1401,20 @@ async function* streamPipeline(
     if (isCorrection && assertion) rewritten += ` (Correction: ${assertion})`;
 
     let context = isRAG && chunks ? compressChunks(chunks, TOKEN_BUDGET.context, excludedEntities) : truncTk(rawContext, TOKEN_BUDGET.context);
+
+    // Answer engine interception (same as non-streaming pipeline)
+    const allChunksStream = isRAG && chunks ? chunks : context ? [context] : [];
+    const engineResultStream = tryAnswer(rawQuery, allChunksStream);
+    if (engineResultStream && engineResultStream.skipModel) {
+      console.log(`[Chat] Answer engine (stream): code-based answer`);
+      yield engineResultStream.answer;
+      recentResponses.push(engineResultStream.answer);
+      if (recentResponses.length > 5) recentResponses.shift();
+      return;
+    }
+    if (engineResultStream && !engineResultStream.skipModel) {
+      context = engineResultStream.tinyPrompt;
+    }
 
     const flags = { frustrated, isCorrection, intent };
     const messages = intent === 'EXHAUSTIVE_LIST' && context
