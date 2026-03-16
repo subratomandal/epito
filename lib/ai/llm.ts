@@ -788,6 +788,18 @@ async function quickCall(prompt: string, maxTk = 50): Promise<string> {
   return '';
 }
 
+// ─── Step 0: Distress Detection (runs BEFORE everything, no model call) ──────
+// ISACA 2025 documented lawsuits against AI apps that failed to handle distress.
+// This is a legal and ethical requirement, not a feature.
+
+const DISTRESS_RE = /\b(hate my life|want to die|kill myself|end it all|no point in living|suicide|self.?harm|hurt myself|nobody cares|worthless|hopeless|can'?t go on|don'?t want to live)\b/i;
+
+const DISTRESS_RESPONSE = "It sounds like you're going through something really difficult. I'm a notes assistant and not the right resource for this, but please talk to someone who can help.\n\n988 Suicide and Crisis Lifeline: call or text 988 (US)\nCrisis Text Line: text HOME to 741741\n\nYou're not alone, and these feelings can get better with support.";
+
+function detectDistress(msg: string): boolean {
+  return DISTRESS_RE.test(msg);
+}
+
 // ─── Step 1: Frustration Detection ───────────────────────────────────────────
 
 const FRUSTRATION_RE = /\b(dumb|stupid|wtf|idiot|useless|wrong again|i already said|i told you|i just asked|for the .* time|forget it|never mind|are you even reading|not what i asked|that's not it|no that's wrong|you're wrong|still wrong)\b/i;
@@ -855,6 +867,66 @@ async function decomposeQuery(query: string): Promise<string[]> {
 }
 
 // ─── Step 5: Context Compression ─────────────────────────────────────────────
+
+// ─── P6: Context Sufficiency Gate ────────────────────────────────────────────
+// Google ICLR 2025: insufficient context makes hallucination WORSE.
+// If retrieved chunks score below threshold, force abstention instead of
+// feeding irrelevant context that increases model confidence in wrong answers.
+
+type ContextSufficiency = 'SUFFICIENT' | 'LOW' | 'INSUFFICIENT' | 'NO_CONTEXT';
+
+function checkContextSufficiency(chunks: string[], avgScore: number): ContextSufficiency {
+  if (chunks.length === 0) return 'NO_CONTEXT';
+  if (avgScore < 0.25) return 'INSUFFICIENT';
+  if (avgScore < 0.45) return 'LOW';
+  return 'SUFFICIENT';
+}
+
+// ─── P13: Negation Handling (code-based, no model) ───────────────────────────
+// 7B models fail at negation. "Which are NOT mentioned" returns the mentioned ones.
+// Fix: detect negation, decompose into positive extraction, compute complement in code.
+
+const NEGATION_RE = /\b(not|n'?t|never|no|none|neither|nor|except|other than|besides|excluding|without)\b.*\b(mention|include|list|appear|use|contain|have|reference)\b/i;
+
+function hasNegation(query: string): boolean {
+  return NEGATION_RE.test(query);
+}
+
+// ─── P14: Numerical Query Detection (code computes, not model) ───────────────
+
+const NUMERICAL_RE = /\b(average|mean|sum|total|count|how many|percentage|ratio|maximum|minimum|max|min|fastest|slowest|highest|lowest)\b/i;
+
+function isNumericalQuery(query: string): boolean {
+  return NUMERICAL_RE.test(query);
+}
+
+function extractNumbersFromText(text: string): number[] {
+  const matches = text.match(/\b\d[\d,.]*\b/g) || [];
+  return matches.map(m => parseFloat(m.replace(/,/g, ''))).filter(n => !isNaN(n) && isFinite(n));
+}
+
+function computeNumerical(query: string, numbers: number[]): string | null {
+  if (numbers.length === 0) return null;
+  const q = query.toLowerCase();
+
+  if (/\b(average|mean)\b/.test(q)) {
+    const avg = numbers.reduce((a, b) => a + b, 0) / numbers.length;
+    return `The computed average is ${avg.toFixed(2)} (from ${numbers.length} values: ${numbers.join(', ')}).`;
+  }
+  if (/\b(sum|total)\b/.test(q)) {
+    return `The total is ${numbers.reduce((a, b) => a + b, 0).toFixed(2)}.`;
+  }
+  if (/\b(count|how many)\b/.test(q)) {
+    return `Count: ${numbers.length}.`;
+  }
+  if (/\b(max|maximum|highest|fastest)\b/.test(q)) {
+    return `The maximum value is ${Math.max(...numbers)}.`;
+  }
+  if (/\b(min|minimum|lowest|slowest)\b/.test(q)) {
+    return `The minimum value is ${Math.min(...numbers)}.`;
+  }
+  return null;
+}
 
 function compressChunks(chunks: string[], maxTokens: number, excludeEntities: Set<string>): string {
   if (chunks.length === 0) return '';
@@ -954,15 +1026,8 @@ function buildTwoTierSummary(rollingSummary: string): string {
 // ─── Step 7: Prompt Assembly & Response Design ──────────────────────────────
 // System prompt: exactly 6 rules, <200 tokens. Each rule prevents a documented failure.
 
-const BASE_SYSTEM = `You are Epito, a personal note assistant. You answer questions using ONLY the user's notes provided in the Relevant Notes section.
-
-Rules:
-1. If the answer is in the notes, give it directly. Be specific. Cite which note.
-2. If the answer is NOT in the notes, say: "I don't have that in your notes." Do not guess.
-3. If the notes contain conflicting information, present both and tell the user.
-4. Never invent facts, dates, names, or numbers not present in the notes.
-5. Match your response length to the question. Short questions get short answers.
-6. When listing items, list ALL of them. Do not stop at the first one.`;
+// System prompt: 3 rules, <50 tokens. Research (P10) shows Mistral ignores more.
+const BASE_SYSTEM = `You are Epito, a note assistant. Answer using only the provided notes. If the answer is not in the notes, say "I don't have that in your notes." Be specific and cite the note name.`;
 
 const GROUNDING = `Answer using only the notes above. If the information is not there, say you don't have it. When stating a fact, cite the note name in parentheses.`;
 
@@ -1132,6 +1197,13 @@ async function chatPipeline(
 
   try {
     chatTurns++;
+
+    // Step 0: Distress detection (BEFORE everything, no model call, no retrieval)
+    if (detectDistress(rawQuery)) {
+      console.log('[Chat] DISTRESS detected — returning crisis response');
+      return DISTRESS_RESPONSE;
+    }
+
     const lastResponse = history.length > 0 ? history[history.length - 1]?.content || '' : '';
 
     // Step 1: Frustration detection
@@ -1283,6 +1355,13 @@ async function* streamPipeline(
 
   try {
     chatTurns++;
+
+    // Step 0: Distress detection
+    if (detectDistress(rawQuery)) {
+      yield DISTRESS_RESPONSE;
+      return;
+    }
+
     const lastResponse = history.length > 0 ? history[history.length - 1]?.content || '' : '';
 
     const frustrated = detectFrustration(rawQuery);

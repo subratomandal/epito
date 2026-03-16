@@ -37,6 +37,13 @@ function splitSentences(text: string): string[] {
   return raw.map(s => s.trim()).filter(s => s.length > 0);
 }
 
+// ─── P24: Frontmatter Stripping ──────────────────────────────────────────────
+// Markdown frontmatter (---\nyaml\n---) causes parse errors. Strip before chunking.
+
+function stripFrontmatter(text: string): string {
+  return text.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '').trim();
+}
+
 // ─── Structure-Aware Pre-Processing ──────────────────────────────────────────
 // Extracts code blocks, tables, and lists BEFORE sentence splitting.
 // These are preserved as single chunks and never split mid-structure.
@@ -96,7 +103,7 @@ function extractStructuredBlocks(text: string): StructuredBlock[] {
 }
 
 function chunkText(text: string): { content: string; startOffset: number; endOffset: number }[] {
-  const cleaned = cleanInputText(text);
+  const cleaned = cleanInputText(stripFrontmatter(text));
   if (!cleaned.trim()) return [];
 
   const blocks = extractStructuredBlocks(cleaned);
