@@ -103,27 +103,25 @@ export async function POST(request: NextRequest) {
 
         const queryType = classifyQuery(chatMessage);
 
-        if (queryType === 'greeting' || queryType === 'casual') {
+        if (queryType === 'greeting') {
           return NextResponse.json({ response: getGreetingResponse(), source: 'classification' });
         }
 
+        // Everything else goes through the full pipeline — no short-circuits
         const retrieval = await contextualRetrieveForChat(sourceId || null, chatMessage, 5);
 
-        if (retrieval.contexts.length > 0) {
-          const response = await chatWithRAG(retrieval.contexts, chatMessage, chatHistory || []);
-          return NextResponse.json({
-            response,
-            source: 'rag',
-            retrieval: {
-              method: retrieval.method,
-              sources: retrieval.sources,
-            },
-          });
-        }
-
+        const response = await chatWithRAG(
+          retrieval.contexts.length > 0 ? retrieval.contexts : [],
+          chatMessage,
+          chatHistory || [],
+        );
         return NextResponse.json({
-          response: 'No relevant content found in the document to answer your question. Try rephrasing or ensure the document has been processed.',
-          source: 'none',
+          response,
+          source: retrieval.contexts.length > 0 ? 'rag' : 'pipeline',
+          retrieval: {
+            method: retrieval.method,
+            sources: retrieval.sources,
+          },
         });
       }
 

@@ -79,17 +79,16 @@ export async function POST(request: NextRequest) {
 
           const queryType = classifyQuery(chatMessage);
 
-          if (queryType === 'greeting' || queryType === 'casual') {
+          if (queryType === 'greeting') {
             const greeting = getGreetingResponse();
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: greeting })}\n\n`));
           } else {
+            // Everything goes through the full pipeline — no short-circuits
             const retrieval = await contextualRetrieveForChat(sourceId || null, chatMessage, 5);
 
             if (retrieval.contexts.length > 0) {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-                progress: retrieval.method === 'contextual'
-                  ? `Found ${retrieval.sources.length} relevant section${retrieval.sources.length > 1 ? 's' : ''} in document...`
-                  : 'Searching document...',
+                progress: `Found ${retrieval.sources.length} relevant section${retrieval.sources.length > 1 ? 's' : ''} in document...`,
               })}\n\n`));
 
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
@@ -98,12 +97,14 @@ export async function POST(request: NextRequest) {
                   sources: retrieval.sources,
                 },
               })}\n\n`));
+            }
 
-              for await (const chunk of chatWithRAGStream(retrieval.contexts, chatMessage, chatHistory || [])) {
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: chunk })}\n\n`));
-              }
-            } else {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: 'No relevant content found in the document to answer your question. Try rephrasing or ensure the document has been processed.' })}\n\n`));
+            for await (const chunk of chatWithRAGStream(
+              retrieval.contexts.length > 0 ? retrieval.contexts : [],
+              chatMessage,
+              chatHistory || [],
+            )) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: chunk })}\n\n`));
             }
           }
         } else if (action === 'summarize-section') {
