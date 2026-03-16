@@ -336,110 +336,264 @@ function cleanExplainOutput(text: string): string {
 
 const MAX_OUTPUT_TOKENS = 200;
 
-const SYSTEM_PROMPT = `You are a world-class analyst and educator. You produce comprehensive, deeply insightful, publication-quality outputs. You never rush, never abbreviate, and never produce shallow work. Every response should demonstrate expert-level understanding and provide genuine value that goes beyond what the user could derive on their own.`;
+const SYSTEM_PROMPT = `You are a world-class analyst and educator. You produce comprehensive, deeply insightful, publication-quality outputs.`;
 
-const CHUNK_INSIGHT_PROMPT = (sections: string) =>
-`Analyze each text section below with expert-level depth. For each section, extract:
+// ═══════════════════════════════════════════════════════════════════════════════
+// Summarization Pipeline — 3-stage, max 1 model call (except map_reduce)
+//
+// Stage 1: Length-based routing (zero inference)
+// Stage 2: TextRank extractive pre-filtering (zero inference, <200ms)
+// Stage 3: Abstractive summarization (single model call, streamed)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-1. The core argument, thesis, or main idea being communicated
-2. Key facts, evidence, data points, or supporting claims
-3. Non-obvious implications — what does this mean in a broader context?
-4. Connections between ideas across different sections
-5. Any assumptions, limitations, or counterarguments implied
+const SUMMARY_PARAMS = { temperature: 0.15, repeat_penalty: 1.15, top_p: 0.9, top_k: 40 };
+const MAP_PARAMS = { temperature: 0.1, repeat_penalty: 1.15, top_p: 0.85, top_k: 30 };
 
-Do NOT copy or paraphrase the original text. Extract the underlying meaning and significance. Be thorough and specific — vague summaries are useless.
+// ─── Stage 1: Length Router ──────────────────────────────────────────────────
 
-Text sections:
-"""
-${sections}
-"""`;
+type SumStrategy = 'passthrough' | 'direct' | 'extractive' | 'map_reduce';
 
-const SYNTHESIS_PROMPT = (insights: string) =>
-`You are synthesizing extracted insights into a comprehensive, well-organized analysis.
-
-Create a structured summary following this format:
-- Start with a single overview sentence that captures the central thesis or theme
-- Group related insights into logical categories
-- Use "-" for main points
-- Use "  -" (two spaces + dash) for supporting details under each main point
-- Every main point should contain at least one supporting detail
-- Cover ALL significant ideas — do not drop or merge important distinct points
-- Highlight the most important and non-obvious findings
-- Remove genuine redundancy but preserve nuance and distinct perspectives
-- Write in clear, analytical language — rephrase for clarity, never copy original text
-
-Do NOT use markdown formatting (no bold, italic, headers, numbering).
-Do NOT include meta-commentary like "Here is the summary" or "In conclusion."
-Output the structured analysis directly.
-
-Extracted insights:
-"""
-${insights}
-"""`;
-
-export async function summarizeChunks(chunks: string[]): Promise<{ summary: string; keyPoints: string[] } | null> {
-  try {
-    const sections = chunks.map((c, i) => `[Section ${i + 1}]\n${c}`).join('\n\n');
-
-    const insights = await callLLM(CHUNK_INSIGHT_PROMPT(sections), SYSTEM_PROMPT);
-
-    const finalResponse = await callLLM(SYNTHESIS_PROMPT(insights.trim()), SYSTEM_PROMPT);
-
-    return { summary: cleanSummaryOutput(finalResponse), keyPoints: [] };
-  } catch (err) {
-    console.error('[LLM] Chunk summarize error:', err);
-    throw err;
-  }
+function routeNote(wordCount: number): SumStrategy {
+  if (wordCount <= 300) return 'passthrough';
+  if (wordCount <= 1000) return 'direct';
+  if (wordCount <= 3000) return 'extractive';
+  return 'map_reduce';
 }
 
-export async function* summarizeChunksStream(chunks: string[]): AsyncGenerator<string> {
-  const sections = chunks.map((c, i) => `[Section ${i + 1}]\n${c}`).join('\n\n');
+// ─── Stage 2: TextRank Sentence Extraction (zero inference) ──────────────────
 
-  const insights = await callLLM(CHUNK_INSIGHT_PROMPT(sections), SYSTEM_PROMPT);
-
-  for await (const text of streamLLM(SYNTHESIS_PROMPT(insights.trim()), SYSTEM_PROMPT)) {
-    yield cleanSummaryOutput(text);
-  }
+function smartSplitSentences(text: string): string[] {
+  // Split on sentence boundaries but NOT on Mr. Dr. e.g. i.e. etc.
+  return text
+    .replace(/\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)\./g, '$1\u0000')
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.replace(/\u0000/g, '.').trim())
+    .filter(s => s.length > 0);
 }
 
-const SUMMARIZE_PROMPT = (text: string) =>
-`Analyze the following text and produce a comprehensive structured analysis.
+function textRankExtract(text: string, budgetTokens: number): string[] {
+  const sentences = smartSplitSentences(text);
+  if (sentences.length <= 3) return sentences;
 
-Create a structured summary following this format:
-- Start with a single overview sentence that captures the central thesis or theme
-- Group related ideas into logical categories
-- Use "-" for main points
-- Use "  -" (two spaces + dash) for supporting details under each main point
-- Every main point should contain at least one supporting detail
-- Extract deep insights — what does this text really mean? What are the implications?
-- Do not just rephrase sentences — analyze, synthesize, and provide genuine understanding
-- Cover ALL significant ideas comprehensively
+  // Word overlap similarity matrix
+  const n = sentences.length;
+  const wordSets = sentences.map(s => new Set(s.toLowerCase().split(/\s+/).filter(w => w.length > 3)));
+  const sim: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
 
-Do NOT use markdown formatting (no bold, italic, headers, numbering).
-Do NOT include meta-commentary like "Here is the summary."
-Output the structured analysis directly.
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = wordSets[i], b = wordSets[j];
+      if (a.size === 0 || b.size === 0) continue;
+      let inter = 0;
+      for (const w of a) if (b.has(w)) inter++;
+      const score = inter / (a.size + b.size - inter);
+      if (score > 0.1) { sim[i][j] = score; sim[j][i] = score; }
+    }
+  }
 
-Text:
-"""
-${text}
-"""`;
+  // PageRank (20 iterations, damping 0.85)
+  let scores = new Array(n).fill(1 / n);
+  for (let iter = 0; iter < 20; iter++) {
+    const next = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const rowSum = sim[j].reduce((a, b) => a + b, 0);
+        if (rowSum > 0) next[i] += 0.85 * (sim[j][i] / rowSum) * scores[j];
+      }
+      next[i] += 0.15 / n;
+    }
+    scores = next;
+  }
+
+  // Apply scoring boosts
+  const paragraphs = text.split(/\n\s*\n/);
+  let paragraphStarts = new Set<number>();
+  let cursor = 0;
+  for (const p of paragraphs) {
+    const firstSent = smartSplitSentences(p.trim())[0];
+    if (firstSent) {
+      const idx = sentences.indexOf(firstSent);
+      if (idx >= 0) paragraphStarts.add(idx);
+    }
+  }
+
+  const NAMED_ENTITY_RE = /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/;
+  const NUMBER_RE = /\d+/;
+
+  for (let i = 0; i < n; i++) {
+    if (i === 0) scores[i] *= 1.3; // First sentence of document
+    if (paragraphStarts.has(i)) scores[i] *= 1.15;
+    if (NAMED_ENTITY_RE.test(sentences[i])) scores[i] *= 1.1;
+    if (NUMBER_RE.test(sentences[i])) scores[i] *= 1.1;
+    const wc = sentences[i].split(/\s+/).length;
+    if (wc < 5) scores[i] *= 0.5;
+    if (wc > 50) scores[i] *= 0.9;
+  }
+
+  // Select top sentences within budget, return in original order
+  const ranked = scores.map((s, i) => ({ i, s })).sort((a, b) => b.s - a.s);
+  const selected = new Set<number>();
+  let tokens = 0;
+  for (const { i } of ranked) {
+    const tk = Math.ceil(sentences[i].split(/\s+/).length * 1.3);
+    if (tokens + tk > budgetTokens) continue;
+    selected.add(i);
+    tokens += tk;
+  }
+
+  return sentences.filter((_, i) => selected.has(i));
+}
+
+// ─── Stage 3: Abstractive Summarization ──────────────────────────────────────
+
+function validateSummary(summary: string, source: string): string {
+  if (!summary || summary.trim().length < 10) return '';
+
+  // Dedup sentences
+  const sentences = summary.split(/(?<=[.!?])\s+/);
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const s of sentences) {
+    const key = s.toLowerCase().trim();
+    if (key.length < 5) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(s);
+  }
+
+  // Clean encoding artifacts
+  let result = deduped.join(' ')
+    .replace(/â€™/g, "'").replace(/â€œ/g, '"').replace(/â€/g, '"')
+    .replace(/Ã©/g, 'é').replace(/ï¿½/g, '').replace(/Â/g, '');
+
+  return cleanSummaryOutput(result);
+}
+
+// ─── Public API (drop-in replacements) ───────────────────────────────────────
 
 export async function summarizeText(text: string): Promise<{ summary: string; keyPoints: string[] } | null> {
-  try {
-    const cleaned = cleanInputText(text);
-    const response = await callLLM(SUMMARIZE_PROMPT(cleaned), SYSTEM_PROMPT);
-    return { summary: cleanSummaryOutput(response), keyPoints: [] };
-  } catch (err) {
-    console.error('[LLM] Summarize error:', err);
-    throw err;
+  const cleaned = cleanInputText(text);
+  const wc = cleaned.split(/\s+/).length;
+  const strategy = routeNote(wc);
+  console.log(`[Summary] ${wc} words → ${strategy} strategy`);
+
+  if (strategy === 'passthrough') {
+    return { summary: cleaned, keyPoints: [] };
   }
+
+  await ensureLlamaRunning();
+
+  if (strategy === 'direct') {
+    const prompt = `Summarize the following note concisely. Preserve all key facts, names, dates, and conclusions. Do not add information not present in the note.\n\nNote:\n${truncTk(cleaned, 2800)}\n\nWrite a clear summary in 3-5 sentences:`;
+    const response = await callLLM(prompt, SYSTEM_PROMPT, 200);
+    const validated = validateSummary(response, cleaned);
+    return { summary: validated || cleaned.slice(0, 500), keyPoints: [] };
+  }
+
+  if (strategy === 'extractive') {
+    const extracted = textRankExtract(cleaned, 600);
+    const extractedText = extracted.join(' ');
+    console.log(`[Summary] TextRank: ${cleaned.split(/\s+/).length} words → ${extracted.length} sentences (${extractedText.split(/\s+/).length} words)`);
+
+    const prompt = `The following are key sentences extracted from a note. Synthesize them into a clear, coherent summary. Preserve all important facts, names, and conclusions. Do not add information not present below.\n\nKey sentences:\n${extractedText}\n\nWrite a clear summary in 4-6 sentences:`;
+    const response = await callLLM(prompt, SYSTEM_PROMPT, 250);
+    const validated = validateSummary(response, cleaned);
+    return { summary: validated || extractedText, keyPoints: [] };
+  }
+
+  // map_reduce
+  return mapReduceSummarize(cleaned);
 }
 
 export async function* summarizeTextStream(text: string): AsyncGenerator<string> {
   const cleaned = cleanInputText(text);
-  for await (const chunk of streamLLM(SUMMARIZE_PROMPT(cleaned), SYSTEM_PROMPT)) {
+  const wc = cleaned.split(/\s+/).length;
+  const strategy = routeNote(wc);
+
+  if (strategy === 'passthrough') { yield cleaned; return; }
+
+  await ensureLlamaRunning();
+
+  if (strategy === 'direct') {
+    const prompt = `Summarize the following note concisely. Preserve all key facts, names, dates, and conclusions.\n\nNote:\n${truncTk(cleaned, 2800)}\n\nWrite a clear summary in 3-5 sentences:`;
+    for await (const chunk of streamLLM(prompt, SYSTEM_PROMPT, 200)) {
+      yield cleanSummaryOutput(chunk);
+    }
+    return;
+  }
+
+  if (strategy === 'extractive') {
+    const extracted = textRankExtract(cleaned, 600);
+    const prompt = `Synthesize these key sentences into a clear summary. Preserve all facts and names.\n\nKey sentences:\n${extracted.join(' ')}\n\nWrite a clear summary in 4-6 sentences:`;
+    for await (const chunk of streamLLM(prompt, SYSTEM_PROMPT, 250)) {
+      yield cleanSummaryOutput(chunk);
+    }
+    return;
+  }
+
+  // map_reduce: stream only the final merge
+  const chunkSummaries = await mapPhase(cleaned);
+  const mergePrompt = `Merge these section summaries into one coherent summary. Remove redundancy. Preserve all key facts.\n\nSection summaries:\n${chunkSummaries.join('\n\n')}\n\nWrite a unified summary in 4-6 sentences:`;
+  for await (const chunk of streamLLM(mergePrompt, SYSTEM_PROMPT, 200)) {
     yield cleanSummaryOutput(chunk);
   }
+}
+
+export async function summarizeChunks(chunks: string[]): Promise<{ summary: string; keyPoints: string[] } | null> {
+  const combined = chunks.join('\n\n');
+  return summarizeText(combined);
+}
+
+export async function* summarizeChunksStream(chunks: string[]): AsyncGenerator<string> {
+  const combined = chunks.join('\n\n');
+  yield* summarizeTextStream(combined);
+}
+
+// ─── Map-Reduce Internals ────────────────────────────────────────────────────
+
+async function mapPhase(text: string): Promise<string[]> {
+  const sentences = smartSplitSentences(text);
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentTk = 0;
+
+  for (const s of sentences) {
+    const tk = Math.ceil(s.split(/\s+/).length * 1.3);
+    if (currentTk + tk > 700 && current.length > 0) {
+      chunks.push(current.join(' '));
+      current = [];
+      currentTk = 0;
+    }
+    current.push(s);
+    currentTk += tk;
+  }
+  if (current.length > 0) chunks.push(current.join(' '));
+
+  console.log(`[Summary] Map-reduce: ${chunks.length} chunks`);
+  const summaries: string[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const prompt = `Summarize this text in 2-3 sentences. Keep all key facts and names.\n\n${chunks[i]}\n\nSummary:`;
+    const res = await callLLM(prompt, SYSTEM_PROMPT, 80);
+    summaries.push(cleanSummaryOutput(res));
+    // Thermal throttle: 100ms between calls
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  return summaries;
+}
+
+async function mapReduceSummarize(text: string): Promise<{ summary: string; keyPoints: string[] }> {
+  const chunkSummaries = await mapPhase(text);
+  const mergePrompt = `Merge these section summaries into one coherent summary. Remove redundancy. Preserve all key facts.\n\nSection summaries:\n${chunkSummaries.join('\n\n')}\n\nWrite a unified summary in 4-6 sentences:`;
+  const merged = await callLLM(mergePrompt, SYSTEM_PROMPT, 200);
+  return { summary: validateSummary(merged, text) || chunkSummaries.join(' '), keyPoints: [] };
+}
+
+function truncTkSum(text: string, max: number): string {
+  const w = text.split(/\s+/), m = Math.floor(max / 1.3);
+  return w.length <= m ? text : w.slice(0, m).join(' ') + '...';
 }
 
 const EXPLAIN_PROMPT = (sentenceBlock: string, count: number) =>
