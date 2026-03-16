@@ -261,21 +261,20 @@ export function extractFocusedContext(
     }
 
     // ── Slow path: runtime regex extraction (fallback when no entity index) ──
+    // STRICT: patterns must match the entity TYPE, not just any capitalized phrase.
 
-    // Determine entity type and matching patterns from query
-    type EntityCategory = 'university' | 'company' | 'person' | 'generic';
-    let category: EntityCategory = 'generic';
+    type EntityCategory = 'university' | 'company' | 'person' | 'tool';
+    let category: EntityCategory | null = null;
     const patterns: RegExp[] = [];
-    const filterKeywords: string[] = [];
 
     if (/\b(universit|college|institut|school|academ)\b/i.test(qLower)) {
       category = 'university';
+      // Each pattern MUST contain University/Institute/College/Academy/School
       patterns.push(
-        /(?:General\s+(?:Sir\s+)?)?[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in|Sir|General))*\s+(?:University|Institute|College|Academy|School)/g,
+        /(?:General\s+(?:Sir\s+)?)?[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in|Sir|General))*\s+(?:University|Institute|College|Academy)/g,
         /University\s+of\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g,
-        /[A-Z]{2,5}\b/g, // MIT, IIT, etc.
+        /Massachusetts\s+Institute\s+of\s+Technology/g,
       );
-      filterKeywords.push('university', 'institute', 'college', 'academy', 'school', 'mit', 'iit');
     } else if (/\b(compan|organization|firm|corp|enterprise|business)\b/i.test(qLower)) {
       category = 'company';
       patterns.push(
@@ -284,75 +283,79 @@ export function extractFocusedContext(
     } else if (/\b(person|people|author|researcher|who|writer|scientist)\b/i.test(qLower)) {
       category = 'person';
       patterns.push(
-        /[A-Z][a-z]{1,15}\s+(?:[A-Z]\.?\s+)?[A-Z][a-z]{1,15}(?:\s+[A-Z][a-z]{1,15})?/g,
+        /[A-Z][a-z]{1,15}\s+(?:[A-Z]\.?\s+)?[A-Z][a-z]{1,15}/g,
       );
-    } else {
+    } else if (/\b(tool|library|libraries|framework|software|technolog)\b/i.test(qLower)) {
+      category = 'tool';
       patterns.push(
-        /[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in))*\s+[A-Z][a-z]+/g,
+        /\b(?:BeautifulSoup|Scrapy|Selenium|lxml|MechanicalSoup|Flask|Django|MongoDB|PostgreSQL|MySQL|Redis|TensorFlow|PyTorch|Keras|NumPy|Pandas|React|Angular|Vue|Docker|Kubernetes)\b/g,
       );
     }
 
-    // ── Step 1: Extract from ALL chunks (not just KWIC excerpts) ──
-    const rawEntities: { name: string; evidence: string }[] = [];
-    const seen = new Map<string, number>(); // normalized → index in rawEntities
+    // If we don't know what entity type → don't extract, let the model handle it
+    if (!category || patterns.length === 0) {
+      // No extraction — fall through to model generation
+    } else {
+      const rawEntities: { name: string; evidence: string }[] = [];
+      const seen = new Map<string, number>();
 
-    for (const chunk of chunks) {
-      for (const pattern of patterns) {
-        pattern.lastIndex = 0;
-        let m;
-        while ((m = pattern.exec(chunk)) !== null) {
-          const raw = m[0].trim();
-          if (raw.length < 3) continue;
+      for (const chunk of chunks) {
+        for (const pattern of patterns) {
+          pattern.lastIndex = 0;
+          let m;
+          while ((m = pattern.exec(chunk)) !== null) {
+            const raw = m[0].trim();
+            if (raw.length < 4) continue;
 
-          // ── Step 2: Normalize ──
-          let normalized = raw;
-          // Common abbreviation expansion
-          if (normalized === 'MIT') normalized = 'Massachusetts Institute of Technology';
-          if (normalized === 'IIT') continue; // too ambiguous without suffix
+            // Normalize
+            let normalized = raw;
+            if (normalized === 'MIT') normalized = 'Massachusetts Institute of Technology';
 
-          const key = normalized.toLowerCase();
+            const key = normalized.toLowerCase();
 
-          // ── Step 3: Filter by entity type keywords ──
-          if (category === 'university' && filterKeywords.length > 0) {
-            const hasKeyword = filterKeywords.some(kw => key.includes(kw));
-            if (!hasKeyword && raw.length < 5) continue; // skip short non-matching
-          }
+            // For universities: MUST contain university/institute/college/academy
+            if (category === 'university') {
+              if (!/university|institute|college|academy/i.test(key) && key !== 'massachusetts institute of technology') {
+                continue;
+              }
+            }
 
-          // ── Step 4: Deduplicate ──
-          if (!seen.has(key)) {
-            // Extract evidence: the sentence containing this entity
-            const sentenceStart = Math.max(0, chunk.lastIndexOf('.', m.index) + 1);
-            const sentenceEnd = chunk.indexOf('.', m.index + raw.length);
-            const evidence = chunk.slice(sentenceStart, sentenceEnd > 0 ? sentenceEnd + 1 : m.index + raw.length + 80).trim();
+            // Deduplicate
+            if (!seen.has(key)) {
+              const sentenceStart = Math.max(0, chunk.lastIndexOf('.', m.index) + 1);
+              const sentenceEnd = chunk.indexOf('.', m.index + raw.length);
+              const evidence = chunk.slice(sentenceStart, sentenceEnd > 0 ? sentenceEnd + 1 : m.index + raw.length + 80).trim();
 
-            seen.set(key, rawEntities.length);
-            rawEntities.push({ name: normalized, evidence: evidence.slice(0, 150) });
+              seen.set(key, rawEntities.length);
+              rawEntities.push({ name: normalized, evidence: evidence.slice(0, 150) });
+            }
           }
         }
       }
-    }
 
-    // ── Step 5: Format response ──
-    if (rawEntities.length > 0) {
-      const entityLabel = category === 'university' ? 'Universities/Institutions'
-        : category === 'company' ? 'Companies/Organizations'
-        : category === 'person' ? 'People'
-        : 'Entities';
+      // Format response
+      if (rawEntities.length > 0) {
+        const entityLabel = category === 'university' ? 'Universities/Institutions'
+          : category === 'company' ? 'Companies/Organizations'
+          : category === 'person' ? 'People'
+          : category === 'tool' ? 'Tools/Libraries'
+          : 'Items';
 
-      const lines: string[] = [];
-      lines.push(`Answer:`);
-      lines.push(`${rawEntities.length} ${entityLabel.toLowerCase()} found.\n`);
-      lines.push(`${entityLabel}:`);
-      for (const { name } of rawEntities) {
-        lines.push(`• ${name}`);
+        const lines: string[] = [];
+        lines.push(`Answer:`);
+        lines.push(`${rawEntities.length} ${entityLabel.toLowerCase()} found.\n`);
+        lines.push(`${entityLabel}:`);
+        for (const { name } of rawEntities) {
+          lines.push(`• ${name}`);
+        }
+        lines.push(`\nEvidence:`);
+        for (const { name, evidence } of rawEntities.slice(0, 5)) {
+          if (evidence) lines.push(`"${evidence.slice(0, 120)}" → ${name}`);
+        }
+
+        directAnswer = lines.join('\n');
       }
-      lines.push(`\nEvidence:`);
-      for (const { name, evidence } of rawEntities.slice(0, 5)) {
-        lines.push(`"${evidence}" → ${name}`);
-      }
-
-      directAnswer = lines.join('\n');
-    }
+    } // end of category extraction block
   }
 
   console.log(
