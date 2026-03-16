@@ -6,6 +6,8 @@ import {
   getModelStatus, cleanInputText, chunkForSummarization, chunkForExplain,
 } from '@/lib/ai/llm';
 import { canAcceptTask, taskStarted, taskCompleted, isShuttingDown } from '@/lib/lifecycle';
+import { extractFocusedContext } from '@/lib/ai/answer-engine';
+import * as db from '@/lib/database';
 
 export const dynamic = 'force-dynamic';
 
@@ -107,22 +109,62 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ response: getGreetingResponse(), source: 'classification' });
         }
 
-        // Everything else goes through the full pipeline — no short-circuits
+        // Step 1: Retrieve chunks
         const retrieval = await contextualRetrieveForChat(sourceId || null, chatMessage, 5);
 
-        const response = await chatWithRAG(
-          retrieval.contexts.length > 0 ? retrieval.contexts : [],
-          chatMessage,
-          chatHistory || [],
-        );
-        return NextResponse.json({
-          response,
-          source: retrieval.contexts.length > 0 ? 'rag' : 'pipeline',
-          retrieval: {
-            method: retrieval.method,
-            sources: retrieval.sources,
-          },
-        });
+        // Step 2: Try code-based extraction on RAW chunks (not compressed)
+        if (sourceId) {
+          try {
+            const rawChunks = db.getChunksByNote(sourceId).map((c: any) => c.content as string);
+            console.log(`[API] Raw chunks for extraction: ${rawChunks.length}`);
+            if (rawChunks.length > 0) {
+              const extraction = extractFocusedContext(chatMessage, rawChunks);
+              console.log(`[API] Extraction: matches=${extraction.matchCount} directAnswer=${!!extraction.directAnswer}`);
+              if (extraction.directAnswer) {
+                return NextResponse.json({
+                  response: extraction.directAnswer,
+                  source: 'extraction',
+                  retrieval: { method: retrieval.method, sources: retrieval.sources },
+                });
+              }
+            }
+          } catch (extractErr) {
+            console.error('[API] Extraction error:', extractErr);
+          }
+        }
+
+        // Step 3: Fall through to model (only if code extraction didn't answer)
+        try {
+          const response = await chatWithRAG(
+            retrieval.contexts.length > 0 ? retrieval.contexts : [],
+            chatMessage,
+            chatHistory || [],
+          );
+          return NextResponse.json({
+            response,
+            source: retrieval.contexts.length > 0 ? 'rag' : 'pipeline',
+            retrieval: { method: retrieval.method, sources: retrieval.sources },
+          });
+        } catch (modelError: any) {
+          // Model unavailable — return focused context as raw sentences
+          if (retrieval.contexts.length > 0) {
+            const extraction = extractFocusedContext(chatMessage, retrieval.contexts);
+            if (extraction.matchCount > 0) {
+              const sentences = extraction.focusedContext.split(/(?<=[.!?])\s+/).filter(s => s.length > 20).slice(0, 5);
+              if (sentences.length > 0) {
+                return NextResponse.json({
+                  response: 'Based on your notes: ' + sentences.join(' '),
+                  source: 'extraction_fallback',
+                  retrieval: { method: retrieval.method, sources: retrieval.sources },
+                });
+              }
+            }
+          }
+          return NextResponse.json({
+            response: "I couldn't find an answer in your notes for this.",
+            source: 'fallback',
+          });
+        }
       }
 
       case 'prepare-summary': {

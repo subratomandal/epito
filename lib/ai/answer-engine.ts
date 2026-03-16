@@ -31,11 +31,30 @@ const STOP_WORDS = new Set([
 
 // ─── Extract Key Terms from Query ────────────────────────────────────────────
 
+/** Simple suffix stemmer — "universities" → "university", "mentioned" → "mention" */
+function simpleStem(word: string): string {
+  if (word.endsWith('ies') && word.length > 4) return word.slice(0, -3) + 'y';
+  if (word.endsWith('es') && word.length > 4) return word.slice(0, -2);
+  if (word.endsWith('ed') && word.length > 4) return word.slice(0, -2);
+  if (word.endsWith('ing') && word.length > 5) return word.slice(0, -3);
+  if (word.endsWith('tion') && word.length > 5) return word.slice(0, -4) + 'te';
+  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 3) return word.slice(0, -1);
+  return word;
+}
+
 function extractQueryTerms(query: string): string[] {
   const words = query.toLowerCase()
     .replace(/[^\w\s]/g, ' ')
     .split(/\s+/)
     .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+
+  // Add stemmed variants so "universities" matches "university"
+  const withStems: string[] = [];
+  for (const w of words) {
+    withStems.push(w);
+    const stemmed = simpleStem(w);
+    if (stemmed !== w && stemmed.length > 2) withStems.push(stemmed);
+  }
 
   // Also extract multi-word phrases (2-3 word ngrams that appear as-is)
   const cleaned = query.toLowerCase().replace(/[^\w\s]/g, ' ');
@@ -53,8 +72,8 @@ function extractQueryTerms(query: string): string[] {
     }
   }
 
-  // Return unique terms, longest first (phrases before single words)
-  const all = [...new Set([...phrases, ...words])];
+  // Combine: phrases + words + stemmed variants
+  const all = [...new Set([...phrases, ...withStems])];
   all.sort((a, b) => b.length - a.length);
   return all;
 }
@@ -198,7 +217,7 @@ export function extractFocusedContext(
   // For structured queries, extract entities from ALL chunks (not just excerpts)
   // then normalize, deduplicate, count, and format with evidence.
 
-  const isListQuery = /\b(list|all|every|how many|what are|which|mentioned|name|count|number of)\b/i.test(query.toLowerCase());
+  const isListQuery = /\b(list|all|every|how many|what are|what .+ are|which|mentioned|name|count|number of|compared|used|described)\b/i.test(query.toLowerCase());
   const isCountQuery = /\b(how many|count|number of|total)\b/i.test(query.toLowerCase());
 
   let directAnswer: string | null = null;
@@ -208,8 +227,8 @@ export function extractFocusedContext(
 
     // ── Fast path: check pre-built entity index (O(1) database lookup) ──
     // If entities were extracted during ingestion, use those instead of runtime regex
-    const dbEntityType = /\b(universit|college|institut|school|academ)\b/i.test(qLower) ? 'ORG'
-      : /\b(compan|organization|firm|corp|enterprise)\b/i.test(qLower) ? 'ORG'
+    const dbEntityType = /\b(universit|college|institut|school|academ)/i.test(qLower) ? 'ORG'
+      : /\b(compan|organization|firm|corp|enterprise)/i.test(qLower) ? 'ORG'
       : /\b(person|people|author|researcher|who)\b/i.test(qLower) ? 'PERSON'
       : /\b(tool|library|framework|software)\b/i.test(qLower) ? 'TOOL'
       : null;
@@ -221,7 +240,7 @@ export function extractFocusedContext(
         if (dbEntities.length > 0) {
           // Filter for university-specific if needed
           let filtered = dbEntities;
-          if (/\b(universit|college|institut|school|academ)\b/i.test(qLower)) {
+          if (/\b(universit|college|institut|school|academ)/i.test(qLower)) {
             filtered = dbEntities.filter(e =>
               /university|institute|college|academy|school/i.test(e.entity_name)
             );
@@ -267,7 +286,7 @@ export function extractFocusedContext(
     let category: EntityCategory | null = null;
     const patterns: RegExp[] = [];
 
-    if (/\b(universit|college|institut|school|academ)\b/i.test(qLower)) {
+    if (/\b(universit|college|institut|school|academ)/i.test(qLower)) {
       category = 'university';
       // Each pattern MUST contain University/Institute/College/Academy/School
       patterns.push(
@@ -275,7 +294,7 @@ export function extractFocusedContext(
         /University\s+of\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g,
         /Massachusetts\s+Institute\s+of\s+Technology/g,
       );
-    } else if (/\b(compan|organization|firm|corp|enterprise|business)\b/i.test(qLower)) {
+    } else if (/\b(compan|organization|firm|corp|enterprise|business)/i.test(qLower)) {
       category = 'company';
       patterns.push(
         /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+(?:Inc|Corp|Ltd|LLC|Co|Group|Foundation|Technologies|Labs|Systems)\.?)/g,
@@ -285,7 +304,7 @@ export function extractFocusedContext(
       patterns.push(
         /[A-Z][a-z]{1,15}\s+(?:[A-Z]\.?\s+)?[A-Z][a-z]{1,15}/g,
       );
-    } else if (/\b(tool|library|libraries|framework|software|technolog)\b/i.test(qLower)) {
+    } else if (/\b(tool|librar|framework|software|technolog)/i.test(qLower)) {
       category = 'tool';
       patterns.push(
         /\b(?:BeautifulSoup|Scrapy|Selenium|lxml|MechanicalSoup|Flask|Django|MongoDB|PostgreSQL|MySQL|Redis|TensorFlow|PyTorch|Keras|NumPy|Pandas|React|Angular|Vue|Docker|Kubernetes)\b/g,
@@ -333,8 +352,15 @@ export function extractFocusedContext(
         }
       }
 
+      // Deduplicate: remove entities that are substrings of longer entities
+      const deduped = rawEntities.filter((e, i) => {
+        return !rawEntities.some((other, j) =>
+          i !== j && other.name.length > e.name.length && other.name.toLowerCase().includes(e.name.toLowerCase())
+        );
+      });
+
       // Format response
-      if (rawEntities.length > 0) {
+      if (deduped.length > 0) {
         const entityLabel = category === 'university' ? 'Universities/Institutions'
           : category === 'company' ? 'Companies/Organizations'
           : category === 'person' ? 'People'
@@ -343,13 +369,13 @@ export function extractFocusedContext(
 
         const lines: string[] = [];
         lines.push(`Answer:`);
-        lines.push(`${rawEntities.length} ${entityLabel.toLowerCase()} found.\n`);
+        lines.push(`${deduped.length} ${entityLabel.toLowerCase()} found.\n`);
         lines.push(`${entityLabel}:`);
-        for (const { name } of rawEntities) {
+        for (const { name } of deduped) {
           lines.push(`• ${name}`);
         }
         lines.push(`\nEvidence:`);
-        for (const { name, evidence } of rawEntities.slice(0, 5)) {
+        for (const { name, evidence } of deduped.slice(0, 5)) {
           if (evidence) lines.push(`"${evidence.slice(0, 120)}" → ${name}`);
         }
 
