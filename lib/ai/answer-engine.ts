@@ -192,70 +192,108 @@ export function extractFocusedContext(
     focusedContext = matches.map((m, i) => `[${i + 1}] ${m.excerpt}`).join('\n\n');
   }
 
-  // ─── Entity Extraction for List/Count Queries ───────────────────────────
+  // ─── Deterministic Entity Extraction (NER-like, no model) ────────────────
+  // For structured queries, extract entities from ALL chunks (not just excerpts)
+  // then normalize, deduplicate, count, and format with evidence.
+
   const isListQuery = /\b(list|all|every|how many|what are|which|mentioned|name|count|number of)\b/i.test(query.toLowerCase());
   const isCountQuery = /\b(how many|count|number of|total)\b/i.test(query.toLowerCase());
 
   let directAnswer: string | null = null;
 
-  if ((isListQuery || isCountQuery) && matches.length > 0) {
-    // Determine what type of entity to look for from the query
+  if ((isListQuery || isCountQuery) && combined.length > 0) {
     const qLower = query.toLowerCase();
-    const entityPatterns: RegExp[] = [];
 
-    // University/college/institution patterns
+    // Determine entity type and matching patterns from query
+    type EntityCategory = 'university' | 'company' | 'person' | 'generic';
+    let category: EntityCategory = 'generic';
+    const patterns: RegExp[] = [];
+    const filterKeywords: string[] = [];
+
     if (/\b(universit|college|institut|school|academ)\b/i.test(qLower)) {
-      entityPatterns.push(
-        /[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in|Sir|General))*\s+(?:University|Institute|College|Academy)/g,
+      category = 'university';
+      patterns.push(
+        /(?:General\s+(?:Sir\s+)?)?[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in|Sir|General))*\s+(?:University|Institute|College|Academy|School)/g,
         /University\s+of\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g,
-        /[A-Z]{2,}(?:\s+[A-Z][a-z]+)*/g, // MIT, IIT, etc.
+        /[A-Z]{2,5}\b/g, // MIT, IIT, etc.
       );
-    }
-    // Company/organization patterns
-    if (/\b(compan|organization|firm|corp|enterprise)\b/i.test(qLower)) {
-      entityPatterns.push(
-        /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+(?:Inc|Corp|Ltd|LLC|Co|Group|Foundation|Technologies)\.?)/g,
-        /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g,
+      filterKeywords.push('university', 'institute', 'college', 'academy', 'school', 'mit', 'iit');
+    } else if (/\b(compan|organization|firm|corp|enterprise|business)\b/i.test(qLower)) {
+      category = 'company';
+      patterns.push(
+        /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+(?:Inc|Corp|Ltd|LLC|Co|Group|Foundation|Technologies|Labs|Systems)\.?)/g,
       );
-    }
-    // Person patterns
-    if (/\b(person|people|author|researcher|who|name)\b/i.test(qLower)) {
-      entityPatterns.push(
-        /[A-Z][a-z]{1,15}\s+(?:[A-Z]\.?\s+)?[A-Z][a-z]{1,15}/g,
+    } else if (/\b(person|people|author|researcher|who|writer|scientist)\b/i.test(qLower)) {
+      category = 'person';
+      patterns.push(
+        /[A-Z][a-z]{1,15}\s+(?:[A-Z]\.?\s+)?[A-Z][a-z]{1,15}(?:\s+[A-Z][a-z]{1,15})?/g,
       );
-    }
-    // Generic: any capitalized multi-word entity
-    if (entityPatterns.length === 0) {
-      entityPatterns.push(
+    } else {
+      patterns.push(
         /[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in))*\s+[A-Z][a-z]+/g,
       );
     }
 
-    // Scan all excerpts for matching entities
-    const entitySet = new Map<string, string>(); // lowercase → original
-    for (const match of matches) {
-      for (const pattern of entityPatterns) {
+    // ── Step 1: Extract from ALL chunks (not just KWIC excerpts) ──
+    const rawEntities: { name: string; evidence: string }[] = [];
+    const seen = new Map<string, number>(); // normalized → index in rawEntities
+
+    for (const chunk of chunks) {
+      for (const pattern of patterns) {
         pattern.lastIndex = 0;
         let m;
-        while ((m = pattern.exec(match.excerpt)) !== null) {
-          const entity = m[0].trim();
-          const key = entity.toLowerCase();
-          if (entity.length > 4 && !entitySet.has(key)) {
-            entitySet.set(key, entity);
+        while ((m = pattern.exec(chunk)) !== null) {
+          const raw = m[0].trim();
+          if (raw.length < 3) continue;
+
+          // ── Step 2: Normalize ──
+          let normalized = raw;
+          // Common abbreviation expansion
+          if (normalized === 'MIT') normalized = 'Massachusetts Institute of Technology';
+          if (normalized === 'IIT') continue; // too ambiguous without suffix
+
+          const key = normalized.toLowerCase();
+
+          // ── Step 3: Filter by entity type keywords ──
+          if (category === 'university' && filterKeywords.length > 0) {
+            const hasKeyword = filterKeywords.some(kw => key.includes(kw));
+            if (!hasKeyword && raw.length < 5) continue; // skip short non-matching
+          }
+
+          // ── Step 4: Deduplicate ──
+          if (!seen.has(key)) {
+            // Extract evidence: the sentence containing this entity
+            const sentenceStart = Math.max(0, chunk.lastIndexOf('.', m.index) + 1);
+            const sentenceEnd = chunk.indexOf('.', m.index + raw.length);
+            const evidence = chunk.slice(sentenceStart, sentenceEnd > 0 ? sentenceEnd + 1 : m.index + raw.length + 80).trim();
+
+            seen.set(key, rawEntities.length);
+            rawEntities.push({ name: normalized, evidence: evidence.slice(0, 150) });
           }
         }
       }
     }
 
-    if (entitySet.size > 0) {
-      const items = [...entitySet.values()];
-      const numbered = items.map((e, i) => `${i + 1}. ${e}`);
+    // ── Step 5: Format response ──
+    if (rawEntities.length > 0) {
+      const entityLabel = category === 'university' ? 'Universities/Institutions'
+        : category === 'company' ? 'Companies/Organizations'
+        : category === 'person' ? 'People'
+        : 'Entities';
 
-      if (isCountQuery) {
-        directAnswer = `${items.length} found in your notes:\n\n${numbered.join('\n')}`;
-      } else {
-        directAnswer = `Found in your notes:\n\n${numbered.join('\n')}\n\nTotal: ${items.length}`;
+      const lines: string[] = [];
+      lines.push(`Answer:`);
+      lines.push(`${rawEntities.length} ${entityLabel.toLowerCase()} found.\n`);
+      lines.push(`${entityLabel}:`);
+      for (const { name } of rawEntities) {
+        lines.push(`• ${name}`);
       }
+      lines.push(`\nEvidence:`);
+      for (const { name, evidence } of rawEntities.slice(0, 5)) {
+        lines.push(`"${evidence}" → ${name}`);
+      }
+
+      directAnswer = lines.join('\n');
     }
   }
 
