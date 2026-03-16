@@ -159,6 +159,20 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_note_tags_note ON note_tags(note_id);
     CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);
     CREATE INDEX IF NOT EXISTS idx_attachments_note ON note_attachments(note_id);
+
+    CREATE TABLE IF NOT EXISTS entities (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      entity_name TEXT NOT NULL,
+      entity_type TEXT NOT NULL DEFAULT 'ORG',
+      chunk_id TEXT,
+      evidence TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY (document_id) REFERENCES notes(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_entities_doc ON entities(document_id);
+    CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+    CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(entity_name);
   `);
 
   try {
@@ -730,6 +744,38 @@ export function pruneStaleChunkCache(sourceId: string, validCount: number) {
   getDb().prepare(
     'DELETE FROM chunk_cache WHERE source_id = ? AND chunk_index >= ?'
   ).run(sourceId, validCount);
+}
+
+// ─── Entity Index ────────────────────────────────────────────────────────────
+
+export function insertEntity(documentId: string, entityName: string, entityType: string, chunkId: string | null, evidence: string) {
+  const id = randomUUID();
+  getDb().prepare(
+    "INSERT OR IGNORE INTO entities (id, document_id, entity_name, entity_type, chunk_id, evidence) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(id, documentId, entityName, entityType, chunkId, evidence);
+}
+
+export function deleteEntitiesByDocument(documentId: string) {
+  getDb().prepare('DELETE FROM entities WHERE document_id = ?').run(documentId);
+}
+
+export function getEntitiesByDocument(documentId: string, entityType?: string): { entity_name: string; entity_type: string; evidence: string }[] {
+  if (entityType) {
+    return getDb().prepare('SELECT DISTINCT entity_name, entity_type, evidence FROM entities WHERE document_id = ? AND entity_type = ?')
+      .all(documentId, entityType) as any[];
+  }
+  return getDb().prepare('SELECT DISTINCT entity_name, entity_type, evidence FROM entities WHERE document_id = ?')
+    .all(documentId) as any[];
+}
+
+export function searchEntities(query: string, entityType?: string): { entity_name: string; entity_type: string; document_id: string; evidence: string }[] {
+  const pattern = `%${query}%`;
+  if (entityType) {
+    return getDb().prepare("SELECT DISTINCT entity_name, entity_type, document_id, evidence FROM entities WHERE entity_name LIKE ? AND entity_type = ?")
+      .all(pattern, entityType) as any[];
+  }
+  return getDb().prepare("SELECT DISTINCT entity_name, entity_type, document_id, evidence FROM entities WHERE entity_name LIKE ?")
+    .all(pattern) as any[];
 }
 
 export function closeDb() {

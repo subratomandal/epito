@@ -174,6 +174,71 @@ function chunkText(text: string): { content: string; startOffset: number; endOff
   return allChunks.length > 0 ? allChunks : [{ content: cleaned, startOffset: 0, endOffset: cleaned.length }];
 }
 
+// ─── Entity Extraction (runs during ingestion, stored in DB) ─────────────────
+
+const ENTITY_EXTRACTORS: { type: string; patterns: RegExp[] }[] = [
+  {
+    type: 'ORG',
+    patterns: [
+      /(?:General\s+(?:Sir\s+)?)?[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in|Sir|General))*\s+(?:University|Institute|College|Academy|School)/g,
+      /University\s+of\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g,
+      /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+(?:Inc|Corp|Ltd|LLC|Co|Group|Foundation|Technologies|Labs|Systems)\.?)/g,
+    ],
+  },
+  {
+    type: 'PERSON',
+    patterns: [
+      /[A-Z][a-z]{1,15}\s+(?:[A-Z]\.?\s+)?[A-Z][a-z]{1,15}(?:\s+[A-Z][a-z]{1,15})?/g,
+    ],
+  },
+  {
+    type: 'TOOL',
+    patterns: [
+      /\b(?:BeautifulSoup|Scrapy|Selenium|lxml|Flask|Django|MongoDB|PostgreSQL|MySQL|Redis|TensorFlow|PyTorch|Keras|NumPy|Pandas|Scikit-learn|OpenCV|Docker|Kubernetes|React|Angular|Vue|Next\.js|Node\.js)\b/g,
+    ],
+  },
+];
+
+function extractAndStoreEntities(
+  documentId: string,
+  chunks: { content: string; startOffset: number; endOffset: number }[],
+  chunkIds: string[],
+): void {
+  const seen = new Set<string>();
+
+  for (let i = 0; i < chunks.length; i++) {
+    const text = chunks[i].content;
+    const chunkId = chunkIds[i];
+
+    for (const { type, patterns } of ENTITY_EXTRACTORS) {
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0;
+        let m;
+        while ((m = pattern.exec(text)) !== null) {
+          let name = m[0].trim();
+          if (name.length < 3) continue;
+
+          // Normalize common abbreviations
+          if (name === 'MIT') name = 'Massachusetts Institute of Technology';
+
+          const key = `${type}:${name.toLowerCase()}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          // Extract evidence sentence
+          const sentStart = Math.max(0, text.lastIndexOf('.', m.index) + 1);
+          const sentEnd = text.indexOf('.', m.index + m[0].length);
+          const evidence = text.slice(sentStart, sentEnd > 0 ? sentEnd + 1 : m.index + m[0].length + 80).trim().slice(0, 200);
+
+          db.insertEntity(documentId, name, type, chunkId, evidence);
+        }
+      }
+    }
+  }
+
+  console.log(`[AI] Entity index: ${seen.size} entities extracted for document ${documentId}`);
+}
+
 export async function processNote(noteId: string): Promise<void> {
   await initPipeline();
 
@@ -202,6 +267,10 @@ export async function processNote(noteId: string): Promise<void> {
   const noteText = `${note.title}. ${plainText.slice(0, 1000)}`;
   const noteEmb = await generateEmbedding(noteText);
   db.insertNoteEmbedding(noteId, noteEmb);
+
+  // Build entity index — extract organizations, people, tools from all chunks
+  db.deleteEntitiesByDocument(noteId);
+  extractAndStoreEntities(noteId, chunks, chunkIds);
   noteIndex.add(noteId, noteEmb);
 
   scheduleRebuildTopicsAndLinks();

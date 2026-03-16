@@ -1,3 +1,5 @@
+import * as db from '@/lib/database';
+
 /**
  * Answer Engine — dynamic context extraction layer.
  *
@@ -192,7 +194,7 @@ export function extractFocusedContext(
     focusedContext = matches.map((m, i) => `[${i + 1}] ${m.excerpt}`).join('\n\n');
   }
 
-  // ─── Deterministic Entity Extraction (NER-like, no model) ────────────────
+  // ─── Deterministic Entity Lookup (database index first, regex fallback) ──
   // For structured queries, extract entities from ALL chunks (not just excerpts)
   // then normalize, deduplicate, count, and format with evidence.
 
@@ -203,6 +205,62 @@ export function extractFocusedContext(
 
   if ((isListQuery || isCountQuery) && combined.length > 0) {
     const qLower = query.toLowerCase();
+
+    // ── Fast path: check pre-built entity index (O(1) database lookup) ──
+    // If entities were extracted during ingestion, use those instead of runtime regex
+    const dbEntityType = /\b(universit|college|institut|school|academ)\b/i.test(qLower) ? 'ORG'
+      : /\b(compan|organization|firm|corp|enterprise)\b/i.test(qLower) ? 'ORG'
+      : /\b(person|people|author|researcher|who)\b/i.test(qLower) ? 'PERSON'
+      : /\b(tool|library|framework|software)\b/i.test(qLower) ? 'TOOL'
+      : null;
+
+    if (dbEntityType) {
+      try {
+        // Search across all documents in the entity index
+        const dbEntities = db.searchEntities('%', dbEntityType);
+        if (dbEntities.length > 0) {
+          // Filter for university-specific if needed
+          let filtered = dbEntities;
+          if (/\b(universit|college|institut|school|academ)\b/i.test(qLower)) {
+            filtered = dbEntities.filter(e =>
+              /university|institute|college|academy|school/i.test(e.entity_name)
+            );
+            if (filtered.length === 0) filtered = dbEntities; // fallback to all ORG
+          }
+
+          const unique = new Map<string, typeof filtered[0]>();
+          for (const e of filtered) {
+            const key = e.entity_name.toLowerCase();
+            if (!unique.has(key)) unique.set(key, e);
+          }
+
+          if (unique.size > 0) {
+            const items = [...unique.values()];
+            const entityLabel = dbEntityType === 'ORG' ? 'Organizations' : dbEntityType === 'PERSON' ? 'People' : 'Tools';
+            const lines: string[] = [];
+            lines.push(`Answer:`);
+            lines.push(`${items.length} ${entityLabel.toLowerCase()} found.\n`);
+            lines.push(`${entityLabel}:`);
+            for (const { entity_name } of items) lines.push(`• ${entity_name}`);
+            if (items.some(e => e.evidence)) {
+              lines.push(`\nEvidence:`);
+              for (const { entity_name, evidence } of items.slice(0, 5)) {
+                if (evidence) lines.push(`"${evidence.slice(0, 120)}" → ${entity_name}`);
+              }
+            }
+            directAnswer = lines.join('\n');
+            console.log(`[AnswerEngine] Entity index hit: ${items.length} ${dbEntityType} entities from DB`);
+
+            return { focusedContext, matchCount: totalMatches, matchedTerms: foundTerms, directAnswer };
+          }
+        }
+      } catch (e) {
+        // DB not available or table doesn't exist yet — fall through to regex
+        console.log('[AnswerEngine] Entity index unavailable, using regex fallback');
+      }
+    }
+
+    // ── Slow path: runtime regex extraction (fallback when no entity index) ──
 
     // Determine entity type and matching patterns from query
     type EntityCategory = 'university' | 'company' | 'person' | 'generic';
