@@ -283,37 +283,36 @@ fn splash_screen_js() -> String {
         user-select: none;
       }
       .wordmark span {
-        font-size: 42px;
+        font-size: 38px;
         font-weight: 600;
-        letter-spacing: -0.02em;
+        letter-spacing: -0.01em;
         color: rgba(250, 250, 250, 0);
-        animation: letter-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        transform: translateY(8px);
+        animation: letter-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
       }
-      .wordmark span:nth-child(1) { animation-delay: 0.1s; }
-      .wordmark span:nth-child(2) { animation-delay: 0.18s; }
-      .wordmark span:nth-child(3) { animation-delay: 0.26s; }
-      .wordmark span:nth-child(4) { animation-delay: 0.34s; }
-      .wordmark span:nth-child(5) { animation-delay: 0.42s; }
+      .wordmark span:nth-child(1) { animation-delay: 0.05s; }
+      .wordmark span:nth-child(2) { animation-delay: 0.1s; }
+      .wordmark span:nth-child(3) { animation-delay: 0.15s; }
+      .wordmark span:nth-child(4) { animation-delay: 0.2s; }
+      .wordmark span:nth-child(5) { animation-delay: 0.25s; }
       @keyframes letter-in {
         0% {
           color: rgba(250, 250, 250, 0);
-          transform: translateY(12px);
-          filter: blur(4px);
+          transform: translateY(8px);
         }
         100% {
-          color: rgba(250, 250, 250, 0.9);
+          color: rgba(250, 250, 250, 0.88);
           transform: translateY(0);
-          filter: blur(0);
         }
       }
       .loader {
-        width: 48px;
-        height: 2px;
-        background: rgba(250, 250, 250, 0.06);
+        width: 40px;
+        height: 1.5px;
+        background: rgba(250, 250, 250, 0.05);
         border-radius: 1px;
         overflow: hidden;
         opacity: 0;
-        animation: fade-in 0.3s ease 0.7s forwards;
+        animation: fade-in 0.2s ease 0.35s forwards;
       }
       .loader::after {
         content: '';
@@ -802,20 +801,20 @@ pub fn run() {
                     label, event: tauri::WindowEvent::CloseRequested { api, .. }, ..
                 } => {
                     if label == "main" {
-                        // Play exit animation before closing
                         api.prevent_close();
+                        let h = app_handle.clone();
                         if let Some(window) = app_handle.get_webview_window("main") {
-                            // Trigger CSS fade-out animation
                             let _ = window.eval("document.documentElement.classList.add('app-closing')");
                             let w = window.clone();
-                            let h = app_handle.clone();
+                            // Shutdown runs IN PARALLEL with animation — not sequentially.
+                            // Window closes after 150ms (animation duration), shutdown continues in background.
+                            thread::spawn(move || { perform_shutdown(&h); });
                             thread::spawn(move || {
-                                thread::sleep(Duration::from_millis(300));
-                                perform_shutdown(&h);
+                                thread::sleep(Duration::from_millis(150));
                                 let _ = w.destroy();
                             });
                         } else {
-                            perform_shutdown(app_handle);
+                            perform_shutdown(&h);
                         }
                     }
                 }

@@ -162,35 +162,21 @@
 
 /* ─── App launch / exit transitions ─────────────────────────────────── */
 
-/* App content fades in smoothly from the splash screen */
+/* App content appears from splash */
 body {
   opacity: 0;
-  animation: epito-fade-in 0.5s ease-out 0.15s forwards;
+  animation: epito-in 0.3s ease-out forwards;
 }
 
-@keyframes epito-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+@keyframes epito-in {
+  to { opacity: 1; }
 }
 
-/* Exit animation — triggered by adding .app-closing to <html> */
+/* Exit — fast opacity fade, no blur (blur causes GPU repaint jank) */
 html.app-closing body {
-  animation: epito-fade-out 0.3s ease-in forwards !important;
+  animation: epito-out 0.15s ease-in forwards !important;
 }
 
-@keyframes epito-fade-out {
-  from {
-    opacity: 1;
-    transform: scale(1);
-    filter: blur(0);
-  }
-  to {
-    opacity: 0;
-    transform: scale(0.97);
-    filter: blur(2px);
-  }
+@keyframes epito-out {
+  to { opacity: 0; }
 }
