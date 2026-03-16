@@ -1322,6 +1322,21 @@ async function chatPipeline(
       }
     }
 
+    // "Not found" safety net: if model says "I don't have" but pruned context
+    // contained relevant sentences, fall back to the raw pruned context.
+    // This catches the 85% failure rate documented in arxiv 2603.11513.
+    const NOT_FOUND_SIGNALS = ["don't have", "no information", "not mentioned", "not found",
+      "cannot find", "no specific", "not available", "does not contain", "not present"];
+    if (NOT_FOUND_SIGNALS.some(s => response.toLowerCase().includes(s))) {
+      if (extraction.matchCount > 0 && extraction.focusedContext.length > 50) {
+        const sentences = extraction.focusedContext.split(/(?<=[.!?])\s+/).filter(s => s.length > 20).slice(0, 3);
+        if (sentences.length > 0) {
+          response = 'Based on your notes: ' + sentences.join(' ');
+          console.log('[Chat] Model said "not found" but context had answer — using raw sentences');
+        }
+      }
+    }
+
     // Grounding check: flag ungrounded entities/numbers
     const ungrounded = groundingCheck(response, context);
     if (ungrounded.length > 2) {
