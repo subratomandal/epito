@@ -192,29 +192,70 @@ export function extractFocusedContext(
     focusedContext = matches.map((m, i) => `[${i + 1}] ${m.excerpt}`).join('\n\n');
   }
 
-  // For list queries, count unique instances
-  const isListQuery = /\b(list|all|every|how many|what are|which|mentioned|name)\b/i.test(query.toLowerCase());
+  // ─── Entity Extraction for List/Count Queries ───────────────────────────
+  const isListQuery = /\b(list|all|every|how many|what are|which|mentioned|name|count|number of)\b/i.test(query.toLowerCase());
+  const isCountQuery = /\b(how many|count|number of|total)\b/i.test(query.toLowerCase());
 
   let directAnswer: string | null = null;
 
-  if (isListQuery && foundTerms.length > 0) {
-    // For list queries, collect ALL unique multi-word entities near the matched terms
-    // This catches things like university names, person names, tool names
-    const entitySet = new Set<string>();
+  if ((isListQuery || isCountQuery) && matches.length > 0) {
+    // Determine what type of entity to look for from the query
+    const qLower = query.toLowerCase();
+    const entityPatterns: RegExp[] = [];
 
+    // University/college/institution patterns
+    if (/\b(universit|college|institut|school|academ)\b/i.test(qLower)) {
+      entityPatterns.push(
+        /[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in|Sir|General))*\s+(?:University|Institute|College|Academy)/g,
+        /University\s+of\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g,
+        /[A-Z]{2,}(?:\s+[A-Z][a-z]+)*/g, // MIT, IIT, etc.
+      );
+    }
+    // Company/organization patterns
+    if (/\b(compan|organization|firm|corp|enterprise)\b/i.test(qLower)) {
+      entityPatterns.push(
+        /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+(?:Inc|Corp|Ltd|LLC|Co|Group|Foundation|Technologies)\.?)/g,
+        /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g,
+      );
+    }
+    // Person patterns
+    if (/\b(person|people|author|researcher|who|name)\b/i.test(qLower)) {
+      entityPatterns.push(
+        /[A-Z][a-z]{1,15}\s+(?:[A-Z]\.?\s+)?[A-Z][a-z]{1,15}/g,
+      );
+    }
+    // Generic: any capitalized multi-word entity
+    if (entityPatterns.length === 0) {
+      entityPatterns.push(
+        /[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in))*\s+[A-Z][a-z]+/g,
+      );
+    }
+
+    // Scan all excerpts for matching entities
+    const entitySet = new Map<string, string>(); // lowercase → original
     for (const match of matches) {
-      // Extract capitalized multi-word phrases from each excerpt
-      const entityRe = /[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|for|in|de|du|von|van))*\s+[A-Z][a-z]+/g;
-      let m;
-      while ((m = entityRe.exec(match.excerpt)) !== null) {
-        const entity = m[0].trim();
-        if (entity.length > 5) entitySet.add(entity);
+      for (const pattern of entityPatterns) {
+        pattern.lastIndex = 0;
+        let m;
+        while ((m = pattern.exec(match.excerpt)) !== null) {
+          const entity = m[0].trim();
+          const key = entity.toLowerCase();
+          if (entity.length > 4 && !entitySet.has(key)) {
+            entitySet.set(key, entity);
+          }
+        }
       }
     }
 
-    if (entitySet.size > 1) {
-      const items = [...entitySet].map((e, i) => `${i + 1}. ${e}`);
-      directAnswer = `Found ${entitySet.size} items in your notes:\n${items.join('\n')}`;
+    if (entitySet.size > 0) {
+      const items = [...entitySet.values()];
+      const numbered = items.map((e, i) => `${i + 1}. ${e}`);
+
+      if (isCountQuery) {
+        directAnswer = `${items.length} found in your notes:\n\n${numbered.join('\n')}`;
+      } else {
+        directAnswer = `Found in your notes:\n\n${numbered.join('\n')}\n\nTotal: ${items.length}`;
+      }
     }
   }
 

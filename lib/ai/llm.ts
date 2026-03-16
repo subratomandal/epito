@@ -1037,7 +1037,7 @@ const GROUNDING = `Answer using only the notes above. If the information is not 
 const INTENT_PROMPTS: Record<ChatIntent, string> = {
   FACT_LOOKUP: 'Answer in one sentence. State the fact and which note it comes from.',
   YES_NO: 'Answer YES or NO first, then give one sentence of evidence from the notes.',
-  EXHAUSTIVE_LIST: 'List every instance found in the notes. One per line. Include the source note. Do not stop until all instances are listed.',
+  EXHAUSTIVE_LIST: 'List every instance found in the notes. One per line. After the list, state the total count. Include a brief quote as evidence for each.',
   PERSON_QUERY: 'Describe this person based only on what the notes say. List their specific contributions or roles mentioned. Cite the source note for each fact.',
   COMPARISON: 'Compare using specific data from the notes. If the notes contain numbers, use them. State which is better and why based on the data.',
   SUMMARY_REQUEST: 'Give a concise overview based on the notes. Cover the main points in 3-4 sentences.',
@@ -1049,7 +1049,7 @@ const INTENT_PROMPTS: Record<ChatIntent, string> = {
 const INTENT_MAX_TOKENS: Record<ChatIntent, number> = {
   FACT_LOOKUP: 60,
   YES_NO: 40,
-  EXHAUSTIVE_LIST: 200,
+  EXHAUSTIVE_LIST: 250,
   PERSON_QUERY: 150,
   COMPARISON: 200,
   SUMMARY_REQUEST: 150,
