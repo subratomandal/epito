@@ -343,3 +343,95 @@ pub fn log_system_diagnostics() {
 
     log::info!("[System] ═══════════════════════════════════════════════");
 }
+
+// ─── DWM Title Bar Customization ─────────────────────────────────────────
+//
+// Windows 10 1809+ (build 17763) / Windows 11 DWM API for title bar theming.
+// This is how VS Code, Discord, Spotify, and Notion color their title bars.
+// Without this, the Windows title bar follows the system theme regardless
+// of the app's dark/light mode setting.
+//
+// Uses dwmapi.dll FFI — no extra crate dependencies. All calls are best-effort
+// and fail silently on older Windows versions that don't support these attributes.
+
+extern "system" {
+    fn DwmSetWindowAttribute(hwnd: isize, attr: u32, value: *const u8, size: u32) -> i32;
+}
+
+// DWM attribute IDs (from dwmapi.h)
+const DWMWA_USE_IMMERSIVE_DARK_MODE_V1: u32 = 19; // Windows 10 pre-20H1 (undocumented)
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;    // Windows 10 20H1+ (official)
+const DWMWA_BORDER_COLOR: u32 = 34;               // Windows 11 22000+
+const DWMWA_CAPTION_COLOR: u32 = 35;              // Windows 11 22000+
+const DWMWA_TEXT_COLOR: u32 = 36;                  // Windows 11 22000+
+
+/// Win32 COLORREF format: 0x00BBGGRR
+fn colorref(r: u8, g: u8, b: u8) -> u32 {
+    (b as u32) << 16 | (g as u32) << 8 | (r as u32)
+}
+
+fn dwm_set_u32(hwnd: isize, attr: u32, value: u32) -> i32 {
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            attr,
+            &value as *const u32 as *const u8,
+            std::mem::size_of::<u32>() as u32,
+        )
+    }
+}
+
+/// Apply full theme to a Windows title bar.
+/// Sets dark/light mode, caption color, border color, and text color.
+/// Must be called with a valid HWND. All calls are best-effort — fails
+/// silently on older Windows versions that don't support these attributes.
+///
+/// Pattern: VS Code, Discord, Spotify all use DwmSetWindowAttribute
+/// to match their title bar to the app's color scheme.
+pub fn apply_titlebar_theme(hwnd: isize, is_dark: bool) {
+    if hwnd == 0 { return; }
+
+    // 1. Dark mode attribute — controls caption button icon colors (white on dark, dark on light).
+    //    Try the official attribute (20) first, fall back to the pre-20H1 attribute (19).
+    let dark_val: u32 = if is_dark { 1 } else { 0 };
+    let r1 = dwm_set_u32(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark_val);
+    if r1 != 0 {
+        // Older Windows 10 — try the undocumented attribute 19
+        dwm_set_u32(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_V1, dark_val);
+    }
+
+    // 2. Caption (title bar) background color — Windows 11 only.
+    //    On Windows 10, dark mode attribute (above) is sufficient — it makes
+    //    the title bar dark/light automatically. CAPTION_COLOR gives precise control.
+    let caption = if is_dark { colorref(10, 10, 15) } else { colorref(255, 255, 255) };
+    let r2 = dwm_set_u32(hwnd, DWMWA_CAPTION_COLOR, caption);
+
+    // 3. Window border color — matches caption for a seamless look.
+    let r3 = dwm_set_u32(hwnd, DWMWA_BORDER_COLOR, caption);
+
+    // 4. Title text color — for when title text is shown.
+    let text = if is_dark { colorref(255, 255, 255) } else { colorref(10, 10, 15) };
+    let r4 = dwm_set_u32(hwnd, DWMWA_TEXT_COLOR, text);
+
+    log::info!(
+        "[Windows] Title bar theme: {} (dark_mode={}, caption={}, border={}, text={})",
+        if is_dark { "dark" } else { "light" }, r1, r2, r3, r4
+    );
+}
+
+/// Invalidate the non-client area to force a title bar repaint.
+/// Must be called after DWM attribute changes for immediate visual update.
+extern "system" {
+    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+}
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_FRAMECHANGED: u32 = 0x0020;
+
+pub fn force_titlebar_redraw(hwnd: isize) {
+    if hwnd == 0 { return; }
+    unsafe {
+        SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+}

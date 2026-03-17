@@ -412,18 +412,27 @@ async fn save_file_with_dialog(
 
 #[tauri::command]
 fn set_theme_color(app: tauri::AppHandle, theme: String) {
-    // Bug #12349: On macOS, Tauri may invert the backgroundColor.
-    // Try both normal and inverted to see which one works.
-    // Normal: light=white, dark=black
-    let color = if theme == "light" {
-        tauri::webview::Color(255, 255, 255, 255)
-    } else {
+    let is_dark = theme != "light";
+    let color = if is_dark {
         tauri::webview::Color(10, 10, 15, 255)
+    } else {
+        tauri::webview::Color(255, 255, 255, 255)
     };
 
     if let Some(window) = app.get_webview_window("main") {
         let result = window.set_background_color(Some(color));
         log::info!("[Theme] set_background_color({}) = {:?}", theme, result);
+
+        // Windows: Set title bar, border, and caption button colors via DWM API.
+        // Without this, the Windows title bar stays at the system default color
+        // regardless of the app's dark/light mode setting.
+        #[cfg(windows)]
+        {
+            if let Ok(hwnd) = window.hwnd() {
+                native_win::apply_titlebar_theme(hwnd.0, is_dark);
+                native_win::force_titlebar_redraw(hwnd.0);
+            }
+        }
     }
 
     // Save for next launch splash
@@ -550,15 +559,55 @@ fn show_splash(window: &tauri::WebviewWindow) {
     let is_dark = theme != "light";
     log::info!("[Lifecycle] Splash theme: {}", if is_dark { "dark" } else { "light" });
 
-    let bg = if is_dark { "%230a0a0f" } else { "%23ffffff" };
+    // Set WebView2 background color BEFORE any navigation.
+    // This is the color shown between page loads (prevents white flash).
+    let bg_color = if is_dark {
+        tauri::webview::Color(10, 10, 15, 255)
+    } else {
+        tauri::webview::Color(255, 255, 255, 255)
+    };
+    let _ = window.set_background_color(Some(bg_color));
 
+    // Windows: Set title bar color via DWM API.
+    // Must happen BEFORE window.show() so the user never sees a mismatched title bar.
+    #[cfg(windows)]
+    {
+        if let Ok(hwnd) = window.hwnd() {
+            native_win::apply_titlebar_theme(hwnd.0, is_dark);
+        }
+    }
+
+    let bg = if is_dark { "%230a0a0f" } else { "%23ffffff" };
+    let fg = if is_dark { "%23ffffff" } else { "%23111111" };
+
+    // Splash shows "Epito" centered — matches the React BrandedSplash that plays next.
+    // Uses flexbox centering so it works at any window size and position.
     let splash = format!(
-        "data:text/html;charset=utf-8,<!DOCTYPE html><html><head><style>*{{margin:0;padding:0;box-sizing:border-box}}body{{height:100vh;background:{bg};overflow:hidden}}</style></head><body></body></html>",
+        "data:text/html;charset=utf-8,<!DOCTYPE html><html><head><style>\
+*{{margin:0;padding:0;box-sizing:border-box}}\
+html,body{{margin:0;width:100%25;height:100%25;background:{bg};overflow:hidden;\
+display:flex;align-items:center;justify-content:center}}\
+.t{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;\
+font-weight:800;font-size:40px;color:{fg};opacity:0.9;letter-spacing:-0.02em;\
+user-select:none;-webkit-user-select:none}}\
+</style></head><body><div class='t'>Epito</div></body></html>",
         bg = bg,
+        fg = fg,
     );
     let _ = window.navigate(splash.parse().unwrap());
-    // Wait for the data URL to render before showing the window.
-    // Without this, the user sees the white about:blank for ~1 second.
+
+    // Ensure the window is centered on the primary monitor.
+    // The config has "center: true" but restore_window_state may override it
+    // with a saved position. For first launch, re-center explicitly.
+    if load_window_state().is_none() {
+        let _ = window.center();
+    }
+
+    // Wait for the splash to render before showing the window.
+    // Windows WebView2 needs slightly more time than macOS WKWebView.
+    #[cfg(windows)]
+    thread::sleep(Duration::from_millis(400));
+    #[cfg(not(windows))]
     thread::sleep(Duration::from_millis(300));
     let _ = window.show();
 }
@@ -615,21 +664,28 @@ pub fn run() {
 
             if let Some(window) = app.get_webview_window("main") {
                 restore_window_state(&window);
-
-                // Set window background to match theme BEFORE splash
-                let theme = read_saved_theme();
-                let bg = if theme == "light" {
-                    tauri::webview::Color(255, 255, 255, 255)
-                } else {
-                    tauri::webview::Color(10, 10, 15, 255)
-                };
-                let _ = window.set_background_color(Some(bg));
-
                 show_splash(&window);
             }
 
             if cfg!(debug_assertions) {
                 let window = app.get_webview_window("main").unwrap();
+
+                // Apply theme in dev mode too
+                let theme = read_saved_theme();
+                let is_dark = theme != "light";
+                let bg = if is_dark {
+                    tauri::webview::Color(10, 10, 15, 255)
+                } else {
+                    tauri::webview::Color(255, 255, 255, 255)
+                };
+                let _ = window.set_background_color(Some(bg));
+                #[cfg(windows)]
+                {
+                    if let Ok(hwnd) = window.hwnd() {
+                        native_win::apply_titlebar_theme(hwnd.0, is_dark);
+                    }
+                }
+
                 window.navigate("http://127.0.0.1:3000".parse().unwrap())?;
                 let _ = window.show();
                 NODE_READY.store(true, Ordering::Release);
@@ -733,16 +789,28 @@ pub fn run() {
                             log::error!("[Lifecycle] Node.js timeout — navigating anyway");
                         }
                         if let Some(window) = handle_node.get_webview_window("main") {
-                            let _ = window.navigate(url.parse().unwrap());
-
-                            // Inject correct theme into the webview after navigation
                             let theme = read_saved_theme();
-                            let bg = if theme == "light" {
-                                tauri::webview::Color(255, 255, 255, 255)
-                            } else {
+                            let is_dark = theme != "light";
+
+                            // Set WebView2 background color before navigation to prevent
+                            // white flash between splash and app content.
+                            let bg = if is_dark {
                                 tauri::webview::Color(10, 10, 15, 255)
+                            } else {
+                                tauri::webview::Color(255, 255, 255, 255)
                             };
                             let _ = window.set_background_color(Some(bg));
+
+                            let _ = window.navigate(url.parse().unwrap());
+
+                            // Windows: Reapply DWM title bar theme after navigation.
+                            // WebView2 navigation can sometimes reset the window's visual state.
+                            #[cfg(windows)]
+                            {
+                                if let Ok(hwnd) = window.hwnd() {
+                                    native_win::apply_titlebar_theme(hwnd.0, is_dark);
+                                }
+                            }
 
                             // Set localStorage + html class so the app picks up the right theme
                             let js = format!(
