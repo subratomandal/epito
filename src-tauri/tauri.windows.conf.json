@@ -2,8 +2,9 @@
   "app": {
     "windows": [
       {
+        "title": "",
         "titleBarStyle": "Visible",
-        "hiddenTitle": false
+        "hiddenTitle": true
       }
     ]
   }

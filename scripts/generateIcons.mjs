@@ -16,23 +16,54 @@ if (existsSync(SOURCE_IMG)) {
   console.log('[generateIcons] Using source image:', SOURCE_IMG);
 } else {
   const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-    <rect width="512" height="512" rx="108" fill="#0a0a0f"/>
+    <circle cx="256" cy="256" r="256" fill="#0a0a0f"/>
     <text x="256" y="370" font-family="SF Pro Display, Inter, Helvetica Neue, Arial, sans-serif" font-size="340" font-weight="800" fill="#ffffff" text-anchor="middle" letter-spacing="-8">E</text>
   </svg>`;
   sourceBuffer = Buffer.from(SVG);
   console.log('[generateIcons] No source image found, using SVG fallback');
 }
 
-async function generatePNG(size, outputPath) {
-  await sharp(sourceBuffer)
+// Generate a circular (round) PNG with alpha-transparent corners.
+// The source image is cropped to a perfect circle using SVG mask compositing.
+async function generateRoundPNG(size, outputPath) {
+  const r = Math.floor(size / 2);
+  const circleMask = Buffer.from(
+    `<svg width="${size}" height="${size}"><circle cx="${r}" cy="${r}" r="${r}" fill="white"/></svg>`
+  );
+
+  const resized = await sharp(sourceBuffer)
     .resize(size, size, { fit: 'cover' })
     .png()
+    .toBuffer();
+
+  await sharp(resized)
+    .composite([{ input: circleMask, blend: 'dest-in' }])
+    .png()
     .toFile(outputPath);
-  console.log(`  OK: ${outputPath} (${size}x${size})`);
+
+  console.log(`  OK: ${outputPath} (${size}x${size} round)`);
+}
+
+// Generate a circular PNG buffer (for ICO building)
+async function generateRoundBuffer(size) {
+  const r = Math.floor(size / 2);
+  const circleMask = Buffer.from(
+    `<svg width="${size}" height="${size}"><circle cx="${r}" cy="${r}" r="${r}" fill="white"/></svg>`
+  );
+
+  const resized = await sharp(sourceBuffer)
+    .resize(size, size, { fit: 'cover' })
+    .png()
+    .toBuffer();
+
+  return sharp(resized)
+    .composite([{ input: circleMask, blend: 'dest-in' }])
+    .png()
+    .toBuffer();
 }
 
 async function main() {
-  console.log('[generateIcons] Creating "E" logo icons...');
+  console.log('[generateIcons] Creating round "E" logo icons...');
 
   const tauriSizes = [
     { size: 32, name: '32x32.png' },
@@ -52,25 +83,26 @@ async function main() {
   ];
 
   for (const { size, name } of tauriSizes) {
-    await generatePNG(size, join(ICONS_DIR, name));
+    await generateRoundPNG(size, join(ICONS_DIR, name));
   }
 
-  await generatePNG(512, join(PUBLIC_DIR, 'logo.png'));
-  await generatePNG(192, join(PUBLIC_DIR, 'icon-192.png'));
-  await generatePNG(512, join(PUBLIC_DIR, 'icon-512.png'));
-  await generatePNG(32, join(PUBLIC_DIR, 'favicon.png'));
+  await generateRoundPNG(512, join(PUBLIC_DIR, 'logo.png'));
+  await generateRoundPNG(192, join(PUBLIC_DIR, 'icon-192.png'));
+  await generateRoundPNG(512, join(PUBLIC_DIR, 'icon-512.png'));
+  await generateRoundPNG(32, join(PUBLIC_DIR, 'favicon.png'));
 
+  // Build ICO with round icons at multiple resolutions
   const icoSizes = [16, 32, 48, 256];
   const icoPngs = [];
   for (const size of icoSizes) {
-    const buf = await sharp(sourceBuffer).resize(size, size, { fit: 'cover' }).png().toBuffer();
+    const buf = await generateRoundBuffer(size);
     icoPngs.push({ size, buf });
   }
   const ico = buildICO(icoPngs);
   writeFileSync(join(ICONS_DIR, 'icon.ico'), ico);
-  console.log('  OK: icon.ico');
+  console.log('  OK: icon.ico (round)');
   writeFileSync(join(PUBLIC_DIR, 'favicon.ico'), ico);
-  console.log('  OK: public/favicon.ico');
+  console.log('  OK: public/favicon.ico (round)');
 
   try {
     const iconsetDir = join(ICONS_DIR, 'icon.iconset');
@@ -90,17 +122,17 @@ async function main() {
     ];
 
     for (const { size, name } of icnsSizes) {
-      await generatePNG(size, join(iconsetDir, name));
+      await generateRoundPNG(size, join(iconsetDir, name));
     }
 
     execSync(`iconutil -c icns "${iconsetDir}" -o "${join(ICONS_DIR, 'icon.icns')}"`, { stdio: 'pipe' });
     execSync(`rm -rf "${iconsetDir}"`);
-    console.log('  OK: icon.icns');
+    console.log('  OK: icon.icns (round)');
   } catch (err) {
     console.warn('  WARN: Could not generate .icns:', err.message);
   }
 
-  console.log('[generateIcons] Done.');
+  console.log('[generateIcons] Done. All icons are circular.');
 }
 
 function buildICO(images) {
