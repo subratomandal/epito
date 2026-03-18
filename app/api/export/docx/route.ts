@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
         size: { width: '210mm', height: '297mm' },
         margin: { top: '15mm', right: '15mm', bottom: '15mm', left: '15mm' },
       },
-      font: 'Calibri',
+      font: 'Inter',
       fontSize: 22, // half-points: 22 = 11pt
     });
 

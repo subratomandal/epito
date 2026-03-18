@@ -5,7 +5,7 @@ const A4_W = 794;             // 210mm at 96dpi
 const A4_H = 1123;            // 297mm at 96dpi
 const PAGE_MARGIN = 57;       // ~15mm
 const CONTENT_H = A4_H - PAGE_MARGIN * 2;  // 1009px usable height per page
-const RENDER_SCALE = 3;       // 3x = ~288 DPI (print-quality, single render keeps it fast)
+const RENDER_SCALE = 4;       // 4x = ~384 DPI (high-quality print, single render keeps it fast)
 const PDF_W_MM = 210;
 const PDF_H_MM = 297;
 
@@ -82,10 +82,11 @@ async function downloadBlob(blob: Blob, filename: string) {
 }
 
 const EXPORT_CSS = `
-  .epito-export { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1a1a1a; line-height: 1.7; font-size: 15px; }
-  .epito-export h1 { font-size: 28px; font-weight: 700; margin: 0 0 20px 0; color: #111; }
-  .epito-export h2 { font-size: 21px; font-weight: 600; margin: 18px 0 8px 0; color: #111; }
-  .epito-export h3 { font-size: 17px; font-weight: 600; margin: 14px 0 6px 0; color: #111; }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  .epito-export { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1a1a1a; line-height: 1.7; font-size: 15px; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  .epito-export h1 { font-size: 26px; font-weight: 700; margin: 0 0 16px 0; color: #111; line-height: 1.3; }
+  .epito-export h2 { font-size: 21px; font-weight: 600; margin: 14px 0 8px 0; color: #111; line-height: 1.3; }
+  .epito-export h3 { font-size: 17px; font-weight: 600; margin: 12px 0 6px 0; color: #111; line-height: 1.4; }
   .epito-export p { margin: 6px 0; }
   .epito-export ul, .epito-export ol { padding-left: 22px; margin: 6px 0; }
   .epito-export li { margin: 3px 0; }

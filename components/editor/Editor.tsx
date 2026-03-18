@@ -21,7 +21,6 @@ import {
 } from 'react';
 import {
   Bold, Italic, Underline as UnderlineIcon, Strikethrough, Code,
-  Heading1, Heading2, Heading3,
   List, ListOrdered, Quote, Minus, Highlighter, CheckSquare,
   FileText, Clock, CalendarPlus, Copy, Check, Search, X,
   ChevronUp, ChevronDown, AArrowUp, AArrowDown,
@@ -198,9 +197,6 @@ const PlatformShortcutsExt = Extension.create({
   name: 'platformShortcuts',
   addKeyboardShortcuts() {
     const shortcuts: Record<string, () => boolean> = {
-      'Mod-Alt-1': () => this.editor.commands.toggleHeading({ level: 1 }),
-      'Mod-Alt-2': () => this.editor.commands.toggleHeading({ level: 2 }),
-      'Mod-Alt-3': () => this.editor.commands.toggleHeading({ level: 3 }),
       'Mod-Shift-x': () => this.editor.commands.toggleStrike(),
     };
 
@@ -836,42 +832,6 @@ const NoteEditor = forwardRef<NoteEditorHandle, NoteEditorProps>(
 
 export default NoteEditor;
 
-// Heading: if the user selects partial text within a block, split the block
-// at selection boundaries first so only the selected portion becomes a heading.
-// Without this, the entire paragraph converts (standard but unintuitive).
-function applyHeading(e: ReturnType<typeof useEditor> & {}, level: 1 | 2 | 3) {
-  const { from, to, empty } = e.state.selection;
-
-  if (empty) {
-    e.chain().focus().toggleHeading({ level }).run();
-    return;
-  }
-
-  const $from = e.state.doc.resolve(from);
-  const $to = e.state.doc.resolve(to);
-
-  // Multi-block selection or entire block selected — standard toggle
-  if (!$from.sameParent($to) || (from <= $from.start() && to >= $from.end())) {
-    e.chain().focus().toggleHeading({ level }).run();
-    return;
-  }
-
-  // Partial selection within one block — split, then heading
-  const blockEnd = $from.end();
-
-  if (to < blockEnd) {
-    e.commands.setTextSelection(to);
-    e.commands.splitBlock();
-  }
-  // from is before the split point, so position is still valid
-  if (from > $from.start()) {
-    e.commands.setTextSelection(from);
-    e.commands.splitBlock();
-  }
-  // Cursor is now in the middle block (the selected text)
-  e.commands.toggleHeading({ level });
-}
-
 // Toolbar — prevents 20+ button re-renders per keystroke
 
 interface EditorToolbarProps {
@@ -911,9 +871,6 @@ const EditorToolbar = function EditorToolbar({
       case 'align-left': e.chain().focus().setTextAlign('left').run(); break;
       case 'align-center': e.chain().focus().setTextAlign('center').run(); break;
       case 'align-right': e.chain().focus().setTextAlign('right').run(); break;
-      case 'h1': applyHeading(e, 1); break;
-      case 'h2': applyHeading(e, 2); break;
-      case 'h3': applyHeading(e, 3); break;
       case 'bullet': e.chain().focus().toggleBulletList().run(); break;
       case 'ordered': e.chain().focus().toggleOrderedList().run(); break;
       case 'task': e.chain().focus().toggleTaskList().run(); break;
@@ -938,10 +895,6 @@ const EditorToolbar = function EditorToolbar({
       <ToolBtn cmd="align-left" exec={exec} active={editor.isActive({ textAlign: 'left' })} title="Align left"><AlignLeft size={14} /></ToolBtn>
       <ToolBtn cmd="align-center" exec={exec} active={editor.isActive({ textAlign: 'center' })} title="Align center"><AlignCenter size={14} /></ToolBtn>
       <ToolBtn cmd="align-right" exec={exec} active={editor.isActive({ textAlign: 'right' })} title="Align right"><AlignRight size={14} /></ToolBtn>
-      <div className="w-px h-5 bg-border mx-1 shrink-0" />
-      <ToolBtn cmd="h1" exec={exec} active={editor.isActive('heading', { level: 1 })} title={`Heading 1 (${MOD}+${ALT}+1)`}><Heading1 size={14} /></ToolBtn>
-      <ToolBtn cmd="h2" exec={exec} active={editor.isActive('heading', { level: 2 })} title={`Heading 2 (${MOD}+${ALT}+2)`}><Heading2 size={14} /></ToolBtn>
-      <ToolBtn cmd="h3" exec={exec} active={editor.isActive('heading', { level: 3 })} title={`Heading 3 (${MOD}+${ALT}+3)`}><Heading3 size={14} /></ToolBtn>
       <div className="w-px h-5 bg-border mx-1 shrink-0" />
       <ToolBtn cmd="bullet" exec={exec} active={editor.isActive('bulletList')} title={`Bullet list (${MOD}+Shift+8)`}><List size={14} /></ToolBtn>
       <ToolBtn cmd="ordered" exec={exec} active={editor.isActive('orderedList')} title={`Numbered list (${MOD}+Shift+7)`}><ListOrdered size={14} /></ToolBtn>
