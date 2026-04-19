@@ -22,67 +22,60 @@ Supported Content:
 ### Screenshots
 
 <p>
-  <img src="https://raw.githubusercontent.com/subratomandal/Epito/main/public/M.png" alt="Epito note editor with AI chat panel" />
+  <img src="https://raw.githubusercontent.com/subratomandal/Epito/main/assets/mainn.png" alt="Epito note editor with AI chat panel" />
 </p>
 
 <p>
-  <img src="https://raw.githubusercontent.com/subratomandal/Epito/main/public/S.png" alt="Epito image OCR viewer with AI summary panel" />
+  <img src="https://raw.githubusercontent.com/subratomandal/Epito/main/assets/ocr.png" alt="Epito image OCR viewer with AI summary panel" />
 </p>
 
-### Architecture
+<p>
+  <img src="https://raw.githubusercontent.com/subratomandal/Epito/main/assets/searchh.png" alt="Epito image OCR viewer with AI summary panel" />
+</p>
 
-```mermaid
-flowchart TB
-    subgraph Desktop["Tauri Desktop Shell"]
-        WebView["WebView Window"]
-        Rust["Rust Runtime Controller"]
-        ModelMgr["Model Downloader"]
-        ProcessMgr["Node + llama-server Lifecycle"]
-    end
 
-    subgraph App["Next.js Standalone App"]
-        UI["React + Tailwind UI"]
-        API["App Router API Routes"]
-        Editor["TipTap Editor"]
-        Viewer["Document / Image Viewer"]
-        Insight["AI Insights Panel"]
-    end
+ ### Architecture
 
-    subgraph Storage["Local Persistence"]
-        SQLite[("SQLite DB")]
-        Uploads["Uploaded Files"]
-        EncKey["AES-256-GCM Key"]
-        Cache["Chunk / AI Cache"]
-    end
+  ```mermaid
+  flowchart TD
+      User["User"] --> Desktop["Epito Desktop App"]
 
-    subgraph Intelligence["Local AI + Retrieval"]
-        Embeddings["Xenova all-MiniLM-L6-v2"]
-        Vector["In-Memory Vector Index"]
-        Llama["llama.cpp llama-server"]
-        Model["Mistral 7B Instruct GGUF"]
-        OCR["PDF / DOCX / OCR Pipeline"]
-    end
+      subgraph DesktopLayer["Desktop Runtime"]
+          Desktop --> Tauri["Tauri WebView"]
+          Desktop --> Rust["Rust Controller"]
+          Rust --> Node["Bundled Node.js Server"]
+          Rust --> LlamaProc["llama-server Process"]
+          Rust --> ModelDL["Model Download Manager"]
+      end
 
-    Rust --> ProcessMgr
-    Rust --> ModelMgr
-    ProcessMgr --> API
-    WebView --> UI
-    UI --> Editor
-    UI --> Viewer
-    UI --> Insight
-    UI -->|fetch /api| API
+      subgraph AppLayer["Application Layer"]
+          Tauri --> UI["React + Tailwind UI"]
+          UI --> Editor["TipTap Note Editor"]
+          UI --> Viewer["Document / Image Viewer"]
+          UI --> Insights["AI Insights Panel"]
+          UI --> API["Next.js API Routes"]
+      end
 
-    API --> SQLite
-    API --> Uploads
-    API --> EncKey
-    API --> Cache
-    API --> OCR
-    API --> Embeddings
-    API --> Vector
-    API --> Llama
-    ModelMgr --> Model
-    Llama --> Model
-```
+      subgraph DataLayer["Local Data Layer"]
+          API --> SQLite[("SQLite Database")]
+          API --> Uploads["Uploaded Files"]
+          API --> Settings["Settings + Theme"]
+          API --> Cache["Chunk / AI Cache"]
+      end
+
+      subgraph IntelligenceLayer["Local Intelligence"]
+          API --> OCR["OCR + Text Extraction"]
+          API --> Embeddings["MiniLM Embeddings"]
+          Embeddings --> Vector["Vector Search Index"]
+          API --> LlamaProc
+          LlamaProc --> Model["Mistral 7B GGUF"]
+      end
+
+      OCR --> SQLite
+      Vector --> API
+      ModelDL --> Model
+  ```
+
 
 ### Privacy And Security Features
 
